@@ -1,8 +1,7 @@
 // src/pages/UploadResults.jsx
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router';
 import { 
-  UploadCloud, 
   PenTool, 
   ChevronLeft, 
   AlertCircle,
@@ -11,7 +10,7 @@ import {
   Trash2,
   Save,
   CalendarDays,
-  CheckCircle2
+  Files
 } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import { 
@@ -27,6 +26,55 @@ import { useParseResultMutation } from '../features/aiApiSlice';
 const Skeleton = ({ className }) => (
   <div className={`animate-pulse bg-zinc-800 rounded-lg ${className}`}></div>
 );
+
+const SEMESTER_LABEL = { first: '1st Semester', second: '2nd Semester' };
+const SEMESTER_ORDER = { first: 0, second: 1 };
+
+// "2022/2023", "2022-2023", "2022/23" -> "2022/2023" (null if invalid)
+const normalizeSessionInput = (value) => {
+  const m = String(value || '').match(/(\d{4})\s*[\/\\-]\s*(\d{2,4})/);
+  if (!m) return null;
+  const start = m[1];
+  let end = m[2];
+  if (end.length === 2) end = `${start.slice(0, 2)}${end}`;
+  if (Number(end) !== Number(start) + 1) return null;
+  return `${start}/${end}`;
+};
+
+// Rows with a level are grouped by level + semester; rows without one by session + semester
+const groupKeyOf = (row) => {
+  const semester = row.semester || 'unknown';
+  return row.level
+    ? `L${row.level}__${semester}`
+    : `S${row.session || 'none'}__${semester}`;
+};
+
+// Session box that only commits on blur / Enter, so the group doesn't jump while typing
+const SessionInput = ({ value, onCommit, invalid }) => {
+  const [text, setText] = useState(value || '');
+
+  useEffect(() => {
+    setText(value || '');
+  }, [value]);
+
+  const commit = () => {
+    if (text.trim() !== (value || '')) onCommit(text.trim());
+  };
+
+  return (
+    <input
+      type="text"
+      value={text}
+      placeholder="Session e.g. 2022/2023"
+      onChange={(e) => setText(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') e.target.blur(); }}
+      className={`w-44 bg-zinc-950 border text-white text-xs rounded px-2 py-1.5 focus:outline-none font-mono ${
+        invalid ? 'border-red-500/60 focus:border-red-400' : 'border-zinc-700 focus:border-yellow-500'
+      }`}
+    />
+  );
+};
 
 const UploadResults = () => {
   const navigate = useNavigate();
@@ -44,10 +92,11 @@ const UploadResults = () => {
   const [step, setStep] = useState('select');
   const [transferData, setTransferData] = useState({ cgpa: '', credits: '' });
   const [selectedGrades, setSelectedGrades] = useState({}); 
-  const [file, setFile] = useState(null);
+  
+  const [files, setFiles] = useState([]); 
   const [uploadId, setUploadId] = useState(null);
   
-  // 👇 NEW: Semester filter for manual entry
+  // Semester filter for manual entry
   const [semesterFilter, setSemesterFilter] = useState('all'); // 'all' | 'first' | 'second'
 
   // State for editable review rows
@@ -76,7 +125,47 @@ const UploadResults = () => {
     }
   }, [isTransfer, coursesData]);
 
-  // 👇 UPDATED: Toggle logic (click twice to unselect)
+  // Group review rows by level (or session) + semester, keeping the original index for editing
+  const groupedRows = useMemo(() => {
+    const map = new Map();
+
+    editableRows.forEach((row, index) => {
+      const key = groupKeyOf(row);
+
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          level: row.level ? Number(row.level) : null,
+          session: row.session || '',
+          semester: row.semester || 'unknown',
+          items: [],
+        });
+      }
+      const group = map.get(key);
+      if (!group.session && row.session) group.session = row.session;
+      group.items.push({ row, index });
+    });
+
+    return [...map.values()].sort((a, b) => {
+      const aLevel = a.level ?? 9999;
+      const bLevel = b.level ?? 9999;
+      if (aLevel !== bLevel) return aLevel - bLevel;
+
+      const aHas = !!a.session;
+      const bHas = !!b.session;
+      if (aHas !== bHas) return aHas ? -1 : 1;
+
+      const bySession = a.session.localeCompare(b.session);
+      if (bySession !== 0) return bySession;
+
+      return (SEMESTER_ORDER[a.semester] ?? 9) - (SEMESTER_ORDER[b.semester] ?? 9);
+    });
+  }, [editableRows]);
+
+  const hasIncompleteRows = editableRows.some(
+    (r) => !r.session || !['first', 'second'].includes(r.semester)
+  );
+
   const handleGradeSelect = (level, session, courseCode, grade) => {
     const key = `${level}-${session}-${courseCode}`;
     setSelectedGrades(prev => {
@@ -99,9 +188,10 @@ const UploadResults = () => {
         await deleteUpload(uploadId).unwrap();
       }
       setUploadId(null);
-      setFile(null);
+      setFiles([]);
       setSelectedGrades({});
       setEditableRows([]);
+      setHasUnsavedEdits(false);
       setStep('select');
       toast.success("Draft discarded successfully");
     } catch (err) {
@@ -162,12 +252,18 @@ const UploadResults = () => {
      ========================================= */
   const handleDocumentSubmit = async (e) => {
     e.preventDefault();
-    if (!file) return toast.error("Please select a file to upload.");
-    if (file.size > 15 * 1024 * 1024) return toast.error("File is too large. Maximum size is 15MB.");
+    if (files.length === 0) return toast.error("Please select at least one file.");
+
+    // Check combined file size
+    const totalSize = files.reduce((acc, file) => acc + file.size, 0);
+    if (totalSize > 15 * 1024 * 1024) {
+      return toast.error("Total file size is too large. Maximum is 15MB.");
+    }
 
     try {
       const fd = new FormData();
-      fd.append("document", file); 
+      
+      files.forEach(file => fd.append("documents", file));
       
       if (isTransfer) {
         fd.append("transferCgpa", transferData.cgpa);
@@ -177,7 +273,7 @@ const UploadResults = () => {
       const uploadRes = await createSelfUpload(fd).unwrap();
       const newUploadId = uploadRes.upload.id;
 
-      toast.success("File uploaded! AI is reading your document...");
+      toast.success(`${files.length} file(s) uploaded! AI is reading them...`);
       
       try {
         await parseResult({ uploadId: newUploadId }).unwrap();
@@ -226,6 +322,24 @@ const UploadResults = () => {
     setHasUnsavedEdits(true);
   };
 
+  // Set the session for a whole level (both semesters), or for a group of level-less rows
+  const handleSessionCommit = (group, text) => {
+    const normalized = text ? normalizeSessionInput(text) : null;
+    if (text && !normalized) {
+      return toast.error('Invalid session. Use consecutive years like 2022/2023.');
+    }
+
+    setEditableRows((prev) =>
+      prev.map((row) => {
+        const matches = group.level
+          ? Number(row.level) === group.level
+          : groupKeyOf(row) === group.key;
+        return matches ? { ...row, session: normalized } : row;
+      })
+    );
+    setHasUnsavedEdits(true);
+  };
+
   const handleSaveEdits = async () => {
     try {
       await editUploadRows({ id: uploadId, rows: editableRows }).unwrap();
@@ -242,6 +356,7 @@ const UploadResults = () => {
      ========================================= */
   const handlePublish = async () => {
     if (hasUnsavedEdits) return toast.error("Please save your edits before publishing.");
+    if (hasIncompleteRows) return toast.error("Every group needs a session and semester before publishing.");
     try {
       await publishUpload(uploadId).unwrap();
       toast.success("Results published successfully! Your CGPA has been updated.");
@@ -261,7 +376,6 @@ const UploadResults = () => {
     );
   }
 
-  // Count selected grades for the button
   const selectedCount = Object.keys(selectedGrades).length;
 
   return (
@@ -300,7 +414,7 @@ const UploadResults = () => {
               <FileSearch className="w-6 h-6" strokeWidth={1.5} />
             </div>
             <h3 className="text-lg font-bold text-white mb-1">Upload Transcript</h3>
-            <p className="text-sm text-zinc-400">Upload an image or PDF. Our AI will read it for you.</p>
+            <p className="text-sm text-zinc-400">Upload images or PDFs. Our AI will read them.</p>
           </button>
         </div>
       )}
@@ -326,7 +440,7 @@ const UploadResults = () => {
             </div>
           )}
 
-          {/* 👇 SEMESTER FILTER TABS */}
+          {/* SEMESTER FILTER TABS */}
           <div className="flex bg-zinc-900 border border-zinc-800 rounded-xl p-1 w-full max-w-md mx-auto">
             {['all', 'first', 'second'].map((sem) => (
               <button
@@ -373,13 +487,11 @@ const UploadResults = () => {
                 </div>
                 
                 {sessionKeys.map(sessionName => {
-                  // Filter courses based on the selected semester tab
                   const filteredCourses = sessions[sessionName].filter(course => {
                     if (semesterFilter === 'all') return true;
                     return course.semester === semesterFilter;
                   });
 
-                  // If no courses match the filter in this session, skip rendering the whole block
                   if (filteredCourses.length === 0) return null;
 
                   return (
@@ -467,33 +579,49 @@ const UploadResults = () => {
           )}
 
           <div className="border-2 border-dashed border-zinc-700 hover:border-yellow-500/50 rounded-2xl p-10 flex flex-col items-center justify-center text-center transition-colors relative">
-            <input type="file" accept="image/*,application/pdf" onChange={(e) => setFile(e.target.files[0])} className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" />
+            <input 
+              type="file" 
+              accept="image/*,application/pdf" 
+              multiple 
+              onChange={(e) => setFiles(Array.from(e.target.files))} 
+              className="absolute inset-0 w-full h-full opacity-0 cursor-pointer" 
+            />
             <div className="w-16 h-16 rounded-full bg-zinc-800 flex items-center justify-center text-zinc-400 mb-4">
-              <UploadCloud className="w-8 h-8" strokeWidth={1.5} />
+              <Files className="w-8 h-8" strokeWidth={1.5} />
             </div>
-            <p className="text-white font-medium mb-1">{file ? file.name : "Click to upload or drag and drop"}</p>
-            <p className="text-zinc-500 text-xs">PNG, JPG, or PDF up to 15MB</p>
+            <p className="text-white font-medium mb-1">
+              {files.length > 0 ? `${files.length} file(s) selected` : "Click to upload or drag and drop"}
+            </p>
+            <p className="text-zinc-500 text-xs">Upload up to 5 images or PDFs (Total max 15MB)</p>
+            
+            {files.length > 0 && (
+              <div className="mt-4 space-y-1 w-full max-w-xs mx-auto">
+                {files.map((f, i) => (
+                  <p key={i} className="text-[10px] text-zinc-400 truncate bg-zinc-900/50 py-1 px-2 rounded border border-zinc-800">{f.name}</p>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex justify-end pt-4">
-            <button type="submit" disabled={isCreating || isParsing || !file} className="bg-yellow-500 hover:bg-yellow-400 text-zinc-950 text-sm font-bold uppercase tracking-wider px-8 py-3.5 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2">
+            <button type="submit" disabled={isCreating || isParsing || files.length === 0} className="bg-yellow-500 hover:bg-yellow-400 text-zinc-950 text-sm font-bold uppercase tracking-wider px-8 py-3.5 rounded-lg transition-colors disabled:opacity-50 flex items-center gap-2">
               {(isCreating || isParsing) && <Loader2 className="w-4 h-4 animate-spin" />}
-              {isParsing ? 'AI is reading...' : 'Process Document'}
+              {isParsing ? 'AI is reading...' : 'Process Documents'}
             </button>
           </div>
         </form>
       )}
 
-      {/* STEP 3: REVIEW & EDIT */}
+      {/* STEP 3: REVIEW & EDIT (GROUPED BY LEVEL / SESSION + SEMESTER) */}
       {step === 'review' && (
         <div className="space-y-6">
           <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-            <div className="p-4 border-b border-zinc-800 bg-zinc-950/30 flex justify-between items-center">
+            <div className="p-4 border-b border-zinc-800 bg-zinc-950/30 flex justify-between items-center gap-4">
               <div>
                 <h3 className="font-bold text-white">Review & Edit Results</h3>
-                <p className="text-xs text-zinc-400 mt-1">Check the AI's work or your manual entry. Fix any wrong units or grades before publishing.</p>
+                <p className="text-xs text-zinc-400 mt-1">Check the AI's work. Type the session for each level, and fix any wrong units, grades or semesters before publishing.</p>
               </div>
-              <span className={`text-xs font-bold ${editableRows.length === 0 ? 'text-red-500' : 'text-zinc-400'}`}>
+              <span className={`text-xs font-bold whitespace-nowrap ${editableRows.length === 0 ? 'text-red-500' : 'text-zinc-400'}`}>
                 {editableRows.length} courses found
               </span>
             </div>
@@ -507,49 +635,102 @@ const UploadResults = () => {
                 <p className="text-zinc-400 text-sm max-w-md">No courses were provided. Please try a clearer image, or use the Manual Entry option.</p>
               </div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm text-zinc-300">
-                  <thead className="bg-zinc-950/50 text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
-                    <tr>
-                      <th className="px-4 py-3 font-medium w-1/4">Course Code</th>
-                      <th className="px-4 py-3 font-medium w-1/3">Course Title</th>
-                      <th className="px-4 py-3 font-medium w-20">Units</th>
-                      <th className="px-4 py-3 font-medium w-24">Grade</th>
-                      <th className="px-4 py-3 font-medium text-right w-16">Action</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-zinc-800/50">
-                    {editableRows.map((row, i) => (
-                      <tr key={i} className="hover:bg-zinc-800/20 transition-colors">
-                        <td className="px-4 py-2">
-                          <input type="text" value={row.courseCode || ''} onChange={(e) => handleRowChange(i, 'courseCode', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-white text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none font-mono uppercase" />
-                        </td>
-                        <td className="px-4 py-2">
-                          <input type="text" value={row.courseTitle || ''} onChange={(e) => handleRowChange(i, 'courseTitle', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-zinc-300 text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none" />
-                        </td>
-                        <td className="px-4 py-2">
-                          <input type="number" value={row.units || ''} onChange={(e) => handleRowChange(i, 'units', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-white text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none text-center font-bold" />
-                        </td>
-                        <td className="px-4 py-2">
-                          <select value={row.grade || ''} onChange={(e) => handleRowChange(i, 'grade', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-white text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none font-bold appearance-none text-center">
-                            <option value="">N/A</option>
-                            <option value="A">A</option>
-                            <option value="B">B</option>
-                            <option value="C">C</option>
-                            <option value="D">D</option>
-                            <option value="E">E</option>
-                            <option value="F">F</option>
-                          </select>
-                        </td>
-                        <td className="px-4 py-2 text-right">
-                          <button onClick={() => handleRemoveRow(i)} className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors" title="Delete row">
-                            <Trash2 className="w-4 h-4" />
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="p-4 space-y-6">
+                {groupedRows.map((group) => {
+                  const totalUnits = group.items.reduce((sum, { row }) => sum + (Number(row.units) || 0), 0);
+                  const missingSession = !group.session;
+                  const missingSemester = !SEMESTER_LABEL[group.semester];
+                  const isProblem = missingSession || missingSemester;
+
+                  return (
+                    <div key={group.key} className={`border rounded-xl overflow-hidden ${isProblem ? 'border-red-500/30' : 'border-zinc-800'}`}>
+                      <div className={`px-4 py-3 flex flex-wrap items-center justify-between gap-3 border-b ${isProblem ? 'bg-red-500/5 border-red-500/30' : 'bg-zinc-950/50 border-zinc-800'}`}>
+                        <div className="flex flex-wrap items-center gap-3">
+                          <div className="flex items-center gap-2">
+                            <CalendarDays className={`w-4 h-4 ${isProblem ? 'text-red-400' : 'text-yellow-500'}`} />
+                            <h4 className={`text-sm font-bold uppercase tracking-wider ${isProblem ? 'text-red-400' : 'text-yellow-500'}`}>
+                              {group.level ? `${group.level} Level` : 'Other'}
+                              <span className="text-zinc-500 mx-2">•</span>
+                              {SEMESTER_LABEL[group.semester] || 'Unknown Semester'}
+                            </h4>
+                          </div>
+                          <SessionInput
+                            value={group.session}
+                            invalid={missingSession}
+                            onCommit={(text) => handleSessionCommit(group, text)}
+                          />
+                        </div>
+                        <span className="text-[10px] uppercase tracking-wider text-zinc-500">
+                          {group.items.length} course{group.items.length === 1 ? '' : 's'} • {totalUnits} units
+                        </span>
+                      </div>
+
+                      {missingSession && (
+                        <p className="px-4 py-2 text-xs text-red-400 bg-red-500/5 border-b border-red-500/20">
+                          This transcript doesn't print the session. Type it in the box above (e.g. 2022/2023).
+                        </p>
+                      )}
+                      {missingSemester && (
+                        <p className="px-4 py-2 text-xs text-red-400 bg-red-500/5 border-b border-red-500/20">
+                          The semester could not be read. Set it on each row below.
+                        </p>
+                      )}
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left text-sm text-zinc-300">
+                          <thead className="bg-zinc-950/30 text-[10px] uppercase tracking-wider text-zinc-500 border-b border-zinc-800">
+                            <tr>
+                              <th className="px-4 py-3 font-medium">Course Code</th>
+                              <th className="px-4 py-3 font-medium">Course Title</th>
+                              <th className="px-4 py-3 font-medium w-20">Units</th>
+                              <th className="px-4 py-3 font-medium w-24">Grade</th>
+                              <th className="px-4 py-3 font-medium w-32">Semester</th>
+                              <th className="px-4 py-3 font-medium text-right w-16">Action</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-zinc-800/50">
+                            {group.items.map(({ row, index }) => (
+                              <tr key={index} className="hover:bg-zinc-800/20 transition-colors">
+                                <td className="px-4 py-2">
+                                  <input type="text" value={row.courseCode || ''} onChange={(e) => handleRowChange(index, 'courseCode', e.target.value)} className="w-full min-w-[90px] bg-zinc-950 border border-zinc-800 text-white text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none font-mono uppercase" />
+                                </td>
+                                <td className="px-4 py-2">
+                                  <input type="text" value={row.courseTitle || ''} onChange={(e) => handleRowChange(index, 'courseTitle', e.target.value)} className="w-full min-w-[160px] bg-zinc-950 border border-zinc-800 text-zinc-300 text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none" />
+                                </td>
+                                <td className="px-4 py-2">
+                                  <input type="number" value={row.units || ''} onChange={(e) => handleRowChange(index, 'units', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-white text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none text-center font-bold" />
+                                </td>
+                                <td className="px-4 py-2">
+                                  <select value={row.grade || ''} onChange={(e) => handleRowChange(index, 'grade', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-white text-sm rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none font-bold appearance-none text-center">
+                                    <option value="">N/A</option>
+                                    <option value="A">A</option>
+                                    <option value="B">B</option>
+                                    <option value="C">C</option>
+                                    <option value="D">D</option>
+                                    <option value="E">E</option>
+                                    <option value="F">F</option>
+                                  </select>
+                                </td>
+                                <td className="px-4 py-2">
+                                  <select value={row.semester || ''} onChange={(e) => handleRowChange(index, 'semester', e.target.value)} className="w-full bg-zinc-950 border border-zinc-800 text-white text-xs rounded px-2 py-1.5 focus:border-yellow-500/50 focus:outline-none">
+                                    <option value="">Select</option>
+                                    <option value="first">1st Sem</option>
+                                    <option value="second">2nd Sem</option>
+                                  </select>
+                                </td>
+                                <td className="px-4 py-2 text-right">
+                                  <button onClick={() => handleRemoveRow(index)} className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors" title="Delete row">
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
             )}
           </div>
@@ -558,7 +739,9 @@ const UploadResults = () => {
             <p className="text-xs text-zinc-400 max-w-md">
               {hasUnsavedEdits 
                 ? "You have unsaved changes. Please save them before publishing." 
-                : "Make sure all units and grades exactly match your records."}
+                : hasIncompleteRows
+                ? "Every group needs a session and semester before you can publish."
+                : "Make sure all units, grades and semesters exactly match your records."}
             </p>
             
             <div className="flex flex-col sm:flex-row gap-3 w-full sm:w-auto">
@@ -571,7 +754,7 @@ const UploadResults = () => {
                 Save Changes
               </button>
 
-              <button onClick={handlePublish} disabled={isPublishing || isReviewLoading || editableRows.length === 0 || hasUnsavedEdits} className="bg-yellow-500 hover:bg-yellow-400 text-zinc-950 text-sm font-bold uppercase tracking-wider px-8 py-3.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
+              <button onClick={handlePublish} disabled={isPublishing || isReviewLoading || editableRows.length === 0 || hasUnsavedEdits || hasIncompleteRows} className="bg-yellow-500 hover:bg-yellow-400 text-zinc-950 text-sm font-bold uppercase tracking-wider px-8 py-3.5 rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2">
                 {isPublishing && <Loader2 className="w-4 h-4 animate-spin" />}
                 {isPublishing ? 'Publishing...' : 'Publish Results'}
               </button>

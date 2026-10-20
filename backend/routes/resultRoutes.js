@@ -1,7 +1,7 @@
 // routes/resultRoutes.js
 import express from "express";
 import {
-  getHistoricalCourses, // <-- ADDED THIS
+  getHistoricalCourses,
   createLecturerUpload,
   createSelfUpload,
   listUploads,
@@ -14,7 +14,7 @@ import {
   getStudentResults,
   getOfferingResults,
 } from "../controllers/resultController.js";
-import { protect } from "../middleware/authMiddleware.js";
+import { protect } from "../Middleware/authMiddleware.js";
 
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
@@ -31,36 +31,50 @@ cloudinary.config({
 // Multer memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB for result docs
+  limits: { fileSize: 15 * 1024 * 1024 }, // 15MB limit per file
 });
 
 // Everything below requires login
 router.use(protect);
 
-/* ---------- uploads ---------- */
-// New route for historical courses
-router.get("/historical-courses", getHistoricalCourses); 
+/* ============================================================
+   SPECIAL ROUTES
+   ============================================================ */
 
+// Must be above /uploads/:id to avoid route conflicts
+router.get("/historical-courses", getHistoricalCourses);
+
+/* ============================================================
+   UPLOADS
+   ============================================================ */
+
+// Lecturer uploads a single document for a specific offering
 router.post(
   "/uploads/lecturer",
   upload.fields([{ name: "document", maxCount: 1 }]),
   createLecturerUpload
 );
+
+// Student uploads one or multiple documents (max 5)
 router.post(
   "/uploads/self",
-  upload.fields([{ name: "document", maxCount: 1 }]),
+  upload.array("documents", 5), // 👈 Changed to array for multiple files
   createSelfUpload
 );
+
 router.get   ("/uploads",              listUploads);
 router.get   ("/uploads/:id",          getUpload);
 router.patch ("/uploads/:id/rows",     editUploadRows);
 router.post  ("/uploads/:id/publish",  publishUpload);
 router.delete("/uploads/:id",          deleteUpload);
 
-/* ---------- reads ---------- */
-router.get("/me",                      getMyResults);
-router.get("/me/gpa",                  getMyGpa);
-router.get("/student/:studentId",      getStudentResults);
-router.get("/offering/:offeringId",    getOfferingResults);
+/* ============================================================
+   RESULTS READS
+   ============================================================ */
+
+router.get("/me",                   getMyResults);
+router.get("/me/gpa",               getMyGpa);
+router.get("/student/:studentId",   getStudentResults);
+router.get("/offering/:offeringId", getOfferingResults);
 
 export default router;

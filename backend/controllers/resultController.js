@@ -30,22 +30,32 @@ const scoreToGrade = (score) => {
 const uploadFileToCloudinary = (file, folder, options = {}) =>
   new Promise((resolve, reject) => {
     if (!file) return resolve(null);
+    const isPdf = file.mimetype === "application/pdf";
     cloudinary.uploader
       .upload_stream(
-        { folder, resource_type: "auto", ...options },
+        { folder, resource_type: isPdf ? "raw" : "auto", ...options },
         (error, result) => (error ? reject(error) : resolve(result))
       )
       .end(file.buffer);
   });
 
-const deleteFromCloudinary = async (publicId) => {
+const deleteFromCloudinary = async (publicId, resourceType = "image") => {
   if (!publicId) return null;
   try {
-    return await cloudinary.uploader.destroy(publicId, { resource_type: "auto" });
+    return await cloudinary.uploader.destroy(publicId, { resource_type: resourceType });
   } catch (err) {
     console.error("Cloudinary delete failed:", err.message);
     return null;
   }
+};
+
+// multer can give req.files as an array (upload.array) or an object (upload.fields)
+const collectFiles = (req) => {
+  if (Array.isArray(req.files)) return req.files;
+  if (req.files && typeof req.files === "object") {
+    return Object.values(req.files).flat();
+  }
+  return req.file ? [req.file] : [];
 };
 
 const paginate = (query) => {
@@ -78,12 +88,10 @@ const getSettingsDoc = async () => {
 };
 
 const idOf = (v) => String(v?._id || v || "");
-
 const SESSION_NAME_RE = /^(\d{4})\/(\d{4})$/;
 
 const findOrCreateSession = async (name) => {
   const clean = String(name || "").trim();
-
   let sess = await AcademicSession.findOne({ name: clean });
   if (sess) return { sess };
 
@@ -103,7 +111,6 @@ const findOrCreateSession = async (name) => {
   } catch (err) {
     const again = await AcademicSession.findOne({ name: clean });
     if (again) return { sess: again };
-    console.error("findOrCreateSession error:", err);
     return { error: `Could not create session "${clean}": ${err.message}` };
   }
 };
@@ -112,18 +119,11 @@ const findOrCreateSession = async (name) => {
 
 const userCanManageOffering = async (user, offering) => {
   if (user.role === "admin") return true;
-  if (
-    user.role === "lecturer" &&
-    String(offering.lecturer) === String(user.id)
-  ) {
-    return true;
-  }
+  if (user.role === "lecturer" && String(offering.lecturer) === String(user.id)) return true;
   if (
     user.extraRoles?.includes("hod") &&
     (user.scope?.departments || []).map(String).includes(String(offering.department))
-  ) {
-    return true;
-  }
+  ) return true;
   return false;
 };
 
@@ -164,8 +164,7 @@ const sanitizeUpload = (u) => ({
   offering: u.offering || null,
   session: u.session,
   semester: u.semester || null,
-  fileUrl: u.fileUrl || null,
-  originalName: u.originalName || null,
+  fileUrls: u.fileUrls || [],
   parsingStatus: u.parsingStatus,
   parsingError: u.parsingError || null,
   rowCount: u.parsedRows?.length || 0,
@@ -231,13 +230,8 @@ const computeCarryovers = (allResults) => {
 };
 
 /* ============================================================
-   HISTORICAL COURSES (FOR DROPDOWNS)
+   HISTORICAL COURSES (SMART FILTERING)
    ============================================================ */
-
-// @desc    Get all courses for a student's department from 100L up to current level
-// @route   GET /api/results/historical-courses
-// @access  Student
-// controllers/resultController.js
 
 export const getHistoricalCourses = async (req, res) => {
   try {
@@ -248,55 +242,42 @@ export const getHistoricalCourses = async (req, res) => {
     const currentLevel = req.user.level;
     const validLevels = [100, 200, 300, 400, 500].filter((l) => l <= currentLevel);
 
-    // 1. Fetch all courses for the department
     const allCourses = await Course.find({
       department: req.user.department,
       level: { $in: validLevels },
       isActive: true,
     }).lean();
 
-    // 2. Fetch the student's existing published results
-    const myResults = await Result.find({ 
-      student: req.user.id, 
-      isPublished: true 
-    }).lean();
+    const myResults = await Result.find({ student: req.user.id, isPublished: true }).lean();
 
-    // 3. Identify which courses they failed (Carryovers)
+    // Identify carryovers (best grade is F)
     const bestGrades = new Map();
-    myResults.forEach(r => {
+    myResults.forEach((r) => {
       const existing = bestGrades.get(r.courseCode);
-      const points = { A:5, B:4, C:3, D:2, E:1, F:0 };
-      if (!existing || points[r.grade] > points[existing]) {
+      if (!existing || GRADE_POINTS[r.grade] > GRADE_POINTS[existing]) {
         bestGrades.set(r.courseCode, r.grade);
       }
     });
 
     const failedCourseCodes = new Set();
     bestGrades.forEach((grade, code) => {
-      if (grade === 'F') failedCourseCodes.add(code);
+      if (grade === "F") failedCourseCodes.add(code);
     });
 
-    // 4. Group and filter
     const grouped = { 100: {}, 200: {}, 300: {}, 400: {}, 500: {} };
 
     allCourses.forEach((c) => {
-      const level = c.level;
-
-      // 👇 THE MAGIC LOGIC 👇
-      const isCurrentLevel = (level === currentLevel);
+      const isCurrentLevel = c.level === currentLevel;
       const isCarryover = failedCourseCodes.has(c.code);
       const isBuildingHistory = !req.user.hasUploadedHistoricalResults;
 
-      // Only add the course if it's current, a carryover, or they are still building their history
+      // Only show if it's their current level, a carryover, or they haven't uploaded history yet
       if (isCurrentLevel || isCarryover || isBuildingHistory) {
         const sessionName = c.session || "Unspecified Session";
+        if (!grouped[c.level]) grouped[c.level] = {};
+        if (!grouped[c.level][sessionName]) grouped[c.level][sessionName] = [];
 
-        if (!grouped[level]) grouped[level] = {};
-        if (!grouped[level][sessionName]) {
-          grouped[level][sessionName] = [];
-        }
-
-        grouped[level][sessionName].push({
+        grouped[c.level][sessionName].push({
           courseCode: c.code,
           courseTitle: c.title,
           units: c.units,
@@ -324,28 +305,32 @@ export const getHistoricalCourses = async (req, res) => {
 export const createLecturerUpload = async (req, res) => {
   try {
     const { offeringId } = req.body;
-    if (!offeringId) {
-      return res.status(400).json({ message: "offeringId is required" });
-    }
+    if (!offeringId) return res.status(400).json({ message: "offeringId is required" });
 
-    const offering = await CourseOffering.findById(offeringId).populate(
-      "course",
-      "code title units"
-    );
+    const offering = await CourseOffering.findById(offeringId).populate("course", "code title units");
     if (!offering) return res.status(404).json({ message: "Offering not found" });
-
     if (!(await userCanManageOffering(req.user, offering))) {
-      return res.status(403).json({
-        message: "Only the assigned lecturer, HOD or admin can upload results for this offering",
-      });
+      return res.status(403).json({ message: "Not allowed" });
     }
 
-    const file = req.files?.document?.[0];
-    if (!file) {
-      return res.status(400).json({ message: "No document provided" });
-    }
+    const files = collectFiles(req);
+    if (!files.length) return res.status(400).json({ message: "No document provided" });
 
-    const upload = await uploadFileToCloudinary(file, "school_portal/result_uploads");
+    const uploadedFiles = [];
+    try {
+      for (const file of files) {
+        const uploaded = await uploadFileToCloudinary(file, "school_portal/result_uploads");
+        uploadedFiles.push({
+          url: uploaded.secure_url,
+          publicId: uploaded.public_id,
+          mimeType: file.mimetype,
+          originalName: file.originalname,
+        });
+      }
+    } catch (err) {
+      console.error("Cloudinary upload failed:", err.message);
+      return res.status(500).json({ message: `Cloudinary Error: ${err.message || "upload failed"}` });
+    }
 
     const resultUpload = await ResultUpload.create({
       type: "lecturer",
@@ -354,22 +339,13 @@ export const createLecturerUpload = async (req, res) => {
       offering: offering._id,
       session: offering.session,
       semester: offering.semester,
-      fileUrl: upload.secure_url,
-      filePublicId: upload.public_id,
-      originalName: file.originalname,
-      mimeType: file.mimetype,
+      fileUrls: uploadedFiles,
       parsingStatus: "pending",
       publishStatus: "draft",
     });
 
-    await logAudit(req, "upload", "result_upload", resultUpload._id, {
-      offering: offering._id,
-    });
-
-    return res.status(201).json({
-      message: "Upload stored. Next: POST /api/ai/parse/result with uploadId to extract rows.",
-      upload: sanitizeUpload(resultUpload),
-    });
+    await logAudit(req, "upload", "result_upload", resultUpload._id, { offering: offering._id });
+    return res.status(201).json({ message: "Upload stored.", upload: sanitizeUpload(resultUpload) });
   } catch (err) {
     console.error("createLecturerUpload error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -379,17 +355,15 @@ export const createLecturerUpload = async (req, res) => {
 export const createSelfUpload = async (req, res) => {
   try {
     if (req.user.role !== "student") {
-      return res.status(403).json({ message: "Only students can use this endpoint" });
+      return res.status(403).json({ message: "Only students can use this" });
     }
 
     const settings = await getSettingsDoc();
     if (!settings.allowStudentResultUpload) {
-      return res.status(403).json({
-        message: "Self-upload is disabled. Results must be uploaded by your lecturer or HOD.",
-      });
+      return res.status(403).json({ message: "Self-upload is disabled." });
     }
 
-    const file = req.files?.document?.[0];
+    const files = collectFiles(req);
     const hasRows = Array.isArray(req.body.rows) && req.body.rows.length > 0;
 
     if (req.user.isTransferStudent && req.body.transferCgpa) {
@@ -399,60 +373,52 @@ export const createSelfUpload = async (req, res) => {
       });
     }
 
-    if (!file && !hasRows) {
-      return res.status(400).json({
-        message: "Provide either a document file or a `rows` array",
-      });
+    if (files.length === 0 && !hasRows) {
+      return res.status(400).json({ message: "Provide document files or a `rows` array" });
     }
 
-    if (file) {
-      let uploaded;
-
+    // Document mode (one or many pages)
+    if (files.length > 0) {
+      const uploadedFiles = [];
       try {
-        uploaded = await uploadFileToCloudinary(file, "school_portal/self_uploads");
-      } catch (cloudinaryError) {
-        console.error("=========================================");
-        console.error("CLOUDINARY UPLOAD FAILED!");
-        console.error("Error Message:", cloudinaryError.message);
-        console.error("HTTP Code:", cloudinaryError.http_code);
-        console.error("=========================================");
-
-        return res.status(500).json({
-          message: `Cloudinary Error: ${cloudinaryError.message || "Failed to upload file. Check server logs."}`,
-        });
+        for (const file of files) {
+          const uploaded = await uploadFileToCloudinary(file, "school_portal/self_uploads");
+          uploadedFiles.push({
+            url: uploaded.secure_url,
+            publicId: uploaded.public_id,
+            mimeType: file.mimetype,
+            originalName: file.originalname,
+          });
+        }
+      } catch (err) {
+        console.error("Cloudinary upload failed:", err.message);
+        return res.status(500).json({ message: `Cloudinary Error: ${err.message || "upload failed"}` });
       }
 
       const upload = await ResultUpload.create({
         type: "self",
         source: "document",
         uploadedBy: req.user.id,
-        session: null,
-        semester: null,
-        fileUrl: uploaded.secure_url,
-        filePublicId: uploaded.public_id,
-        originalName: file.originalname,
-        mimeType: file.mimetype,
+        fileUrls: uploadedFiles,
         parsingStatus: "pending",
         publishStatus: "draft",
       });
 
       await logAudit(req, "self_upload", "result_upload", upload._id, {
         mode: "document",
+        count: files.length,
       });
-
-      return res.status(201).json({
-        message: "Upload stored. Next: POST /api/ai/parse/result with uploadId to extract rows.",
-        upload: sanitizeUpload(upload),
-      });
+      return res.status(201).json({ message: "Upload stored.", upload: sanitizeUpload(upload) });
     }
 
+    // Manual rows mode
     const rows = req.body.rows.map((r) => ({
       session: r.session,
       semester: r.semester,
       courseCode: String(r.courseCode || "").toUpperCase().trim(),
       courseTitle: r.courseTitle || null,
       units: Number(r.units),
-      score: r.score !== undefined && r.score !== null ? Number(r.score) : null,
+      score: r.score != null ? Number(r.score) : null,
       grade: r.grade ? String(r.grade).toUpperCase().trim() : null,
       matched: true,
       warnings: [],
@@ -461,12 +427,10 @@ export const createSelfUpload = async (req, res) => {
     const invalid = [];
     rows.forEach((r, i) => {
       if (!r.session) invalid.push(`Row ${i + 1}: missing session`);
-      if (!["first", "second"].includes(r.semester))
-        invalid.push(`Row ${i + 1}: invalid semester`);
+      if (!["first", "second"].includes(r.semester)) invalid.push(`Row ${i + 1}: invalid semester`);
       if (!r.courseCode) invalid.push(`Row ${i + 1}: missing courseCode`);
       if (!r.units || r.units < 1) invalid.push(`Row ${i + 1}: invalid units`);
-      if (!r.grade && (r.score === null || r.score === undefined))
-        invalid.push(`Row ${i + 1}: provide grade or score`);
+      if (!r.grade && r.score == null) invalid.push(`Row ${i + 1}: provide grade or score`);
     });
     if (invalid.length) {
       return res.status(400).json({ message: "Validation failed", errors: invalid });
@@ -480,8 +444,6 @@ export const createSelfUpload = async (req, res) => {
       type: "self",
       source: "manual",
       uploadedBy: req.user.id,
-      session: null,
-      semester: null,
       parsingStatus: "completed",
       parsedRows: rows,
       publishStatus: "draft",
@@ -492,12 +454,9 @@ export const createSelfUpload = async (req, res) => {
       rows: rows.length,
     });
 
-    return res.status(201).json({
-      message: "Rows stored. Review and POST /api/results/uploads/:id/publish to save.",
-      upload: sanitizeUpload(upload),
-    });
+    return res.status(201).json({ message: "Rows stored.", upload: sanitizeUpload(upload) });
   } catch (err) {
-    console.error("createSelfUpload general error:", err);
+    console.error("createSelfUpload error:", err);
     return res.status(500).json({ message: err.message || "Server error" });
   }
 };
@@ -510,14 +469,10 @@ export const listUploads = async (req, res) => {
   try {
     const { page, limit, skip } = paginate(req.query);
     const { offering, session, type, publishStatus } = req.query;
-
     const filter = {};
 
-    if (req.user.role === "student") {
-      filter.uploadedBy = req.user.id;
-    } else if (req.query.mine === "true") {
-      filter.uploadedBy = req.user.id;
-    }
+    if (req.user.role === "student") filter.uploadedBy = req.user.id;
+    else if (req.query.mine === "true") filter.uploadedBy = req.user.id;
 
     if (offering) filter.offering = offering;
     if (session) filter.session = session;
@@ -535,12 +490,7 @@ export const listUploads = async (req, res) => {
       ResultUpload.countDocuments(filter),
     ]);
 
-    return res.json({
-      uploads: uploads.map(sanitizeUpload),
-      page,
-      pages: Math.ceil(total / limit),
-      total,
-    });
+    return res.json({ uploads: uploads.map(sanitizeUpload), page, pages: Math.ceil(total / limit), total });
   } catch (err) {
     console.error("listUploads error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -556,17 +506,11 @@ export const getUpload = async (req, res) => {
       .populate("parsedRows.student", "name matricNumber level");
 
     if (!upload) return res.status(404).json({ message: "Upload not found" });
-
     if (!(await userCanReviewUpload(req.user, upload))) {
       return res.status(403).json({ message: "Not allowed" });
     }
 
-    return res.json({
-      upload: {
-        ...sanitizeUpload(upload),
-        parsedRows: upload.parsedRows || [],
-      },
-    });
+    return res.json({ upload: { ...sanitizeUpload(upload), parsedRows: upload.parsedRows || [] } });
   } catch (err) {
     console.error("getUpload error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -585,9 +529,7 @@ export const editUploadRows = async (req, res) => {
     }
 
     const { rows } = req.body;
-    if (!Array.isArray(rows)) {
-      return res.status(400).json({ message: "rows[] required" });
-    }
+    if (!Array.isArray(rows)) return res.status(400).json({ message: "rows[] required" });
 
     upload.parsedRows = rows.map((r) => ({
       matricNumber: r.matricNumber ? String(r.matricNumber).toUpperCase().trim() : null,
@@ -595,11 +537,9 @@ export const editUploadRows = async (req, res) => {
       courseCode: r.courseCode ? String(r.courseCode).toUpperCase().trim() : null,
       courseTitle: r.courseTitle || null,
       units: r.units != null ? Number(r.units) : null,
-      score:
-        r.score !== undefined && r.score !== null && r.score !== ""
-          ? Number(r.score)
-          : null,
+      score: r.score !== undefined && r.score !== null && r.score !== "" ? Number(r.score) : null,
       grade: r.grade ? String(r.grade).toUpperCase().trim() : null,
+      level: r.level ? Number(r.level) : null,
       session: r.session || null,
       semester: r.semester || null,
       matched: !!r.matched,
@@ -609,18 +549,10 @@ export const editUploadRows = async (req, res) => {
     upload.parsedRows.forEach((r) => {
       if (!r.grade && r.score !== null) r.grade = scoreToGrade(r.score);
     });
-
     upload.parsingStatus = "completed";
     await upload.save();
 
-    await logAudit(req, "edit_rows", "result_upload", upload._id, {
-      rowCount: upload.parsedRows.length,
-    });
-
-    return res.json({
-      message: "Rows updated",
-      upload: { ...sanitizeUpload(upload), parsedRows: upload.parsedRows },
-    });
+    return res.json({ message: "Rows updated", upload: { ...sanitizeUpload(upload), parsedRows: upload.parsedRows } });
   } catch (err) {
     console.error("editUploadRows error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -663,16 +595,11 @@ export const publishUpload = async (req, res) => {
           matricNumber: String(row.matricNumber).toUpperCase().trim(),
         });
       }
-
       if (!student && upload.type === "self") {
         student = await User.findById(idOf(upload.uploadedBy));
       }
-
       if (!student) {
-        skipped.push({
-          row: i + 1,
-          reason: `No student found for matric ${row.matricNumber || "N/A"}`,
-        });
+        skipped.push({ row: i + 1, reason: `No student found for matric ${row.matricNumber || "N/A"}` });
         continue;
       }
 
@@ -705,23 +632,21 @@ export const publishUpload = async (req, res) => {
         }
 
         if (!["first", "second"].includes(row.semester)) {
-          skipped.push({
-            row: i + 1,
-            reason: `Invalid or missing semester "${row.semester ?? "null"}"`,
-          });
+          skipped.push({ row: i + 1, reason: `Invalid or missing semester "${row.semester ?? "null"}"` });
+          continue;
+        }
+
+        if (!courseCode || !units) {
+          skipped.push({ row: i + 1, reason: "Missing courseCode or units" });
           continue;
         }
 
         sessionId = sess._id;
         semester = row.semester;
-        if (!courseCode || !units) {
-          skipped.push({ row: i + 1, reason: "Missing courseCode or units" });
-          continue;
-        }
       }
 
       let grade = row.grade;
-      if (!grade && row.score !== null) grade = scoreToGrade(row.score);
+      if (!grade && row.score !== null && row.score !== undefined) grade = scoreToGrade(row.score);
       if (!grade) {
         skipped.push({ row: i + 1, reason: "No grade or score" });
         continue;
@@ -755,12 +680,7 @@ export const publishUpload = async (req, res) => {
     const created = [];
     for (const row of toCreate) {
       const doc = await Result.findOneAndUpdate(
-        {
-          student: row.student,
-          session: row.session,
-          semester: row.semester,
-          courseCode: row.courseCode,
-        },
+        { student: row.student, session: row.session, semester: row.semester, courseCode: row.courseCode },
         { $set: row },
         { upsert: true, new: true }
       );
@@ -773,9 +693,7 @@ export const publishUpload = async (req, res) => {
     await upload.save();
 
     if (upload.type === "self") {
-      await User.findByIdAndUpdate(idOf(upload.uploadedBy), {
-        hasUploadedHistoricalResults: true,
-      });
+      await User.findByIdAndUpdate(idOf(upload.uploadedBy), { hasUploadedHistoricalResults: true });
     }
 
     await logAudit(req, "publish", "result_upload", upload._id, {
@@ -783,11 +701,7 @@ export const publishUpload = async (req, res) => {
       skipped: skipped.length,
     });
 
-    return res.json({
-      message: `Published ${created.length} result(s)`,
-      published: created.length,
-      skipped,
-    });
+    return res.json({ message: `Published ${created.length} result(s)`, published: created.length, skipped });
   } catch (err) {
     console.error("publishUpload error:", err);
     return res.status(500).json({ message: "Server error" });
@@ -796,20 +710,21 @@ export const publishUpload = async (req, res) => {
 
 export const deleteUpload = async (req, res) => {
   try {
-    const upload = await ResultUpload.findById(req.params.id);
+    const upload = await ResultUpload.findById(req.params.id).select("+filePublicId");
     if (!upload) return res.status(404).json({ message: "Upload not found" });
     if (upload.publishStatus === "published") {
-      return res.status(400).json({
-        message: "Cannot delete a published upload. Results are live.",
-      });
+      return res.status(400).json({ message: "Cannot delete a published upload. Results are live." });
     }
     if (!(await userCanReviewUpload(req.user, upload))) {
       return res.status(403).json({ message: "Not allowed" });
     }
 
+    for (const f of upload.fileUrls || []) {
+      await deleteFromCloudinary(f.publicId, f.mimeType === "application/pdf" ? "raw" : "image");
+    }
     if (upload.filePublicId) await deleteFromCloudinary(upload.filePublicId);
-    await ResultUpload.deleteOne({ _id: upload._id });
 
+    await ResultUpload.deleteOne({ _id: upload._id });
     await logAudit(req, "delete", "result_upload", upload._id);
 
     return res.json({ message: "Upload deleted" });
@@ -820,7 +735,7 @@ export const deleteUpload = async (req, res) => {
 };
 
 /* ============================================================
-   RESULTS: READ
+   RESULTS: READ & CACHE SYNC
    ============================================================ */
 
 export const getMyResults = async (req, res) => {
@@ -834,7 +749,6 @@ export const getMyResults = async (req, res) => {
       .populate("session", "name")
       .populate("offering", "course level")
       .sort({ createdAt: -1 });
-
     return res.json({ results: results.map(sanitizeResult) });
   } catch (err) {
     console.error("getMyResults error:", err);
@@ -845,37 +759,24 @@ export const getMyResults = async (req, res) => {
 export const getMyGpa = async (req, res) => {
   try {
     const user = await User.findById(req.user.id);
-    const results = await Result.find({
-      student: req.user.id,
-      isPublished: true,
-    })
+    const results = await Result.find({ student: req.user.id, isPublished: true })
       .populate("session", "name")
       .lean();
 
     const sessionMap = new Map();
     for (const r of results) {
       const key = `${r.session?._id}_${r.semester}`;
-      if (!sessionMap.has(key)) {
-        sessionMap.set(key, {
-          session: r.session,
-          semester: r.semester,
-          results: [],
-        });
-      }
+      if (!sessionMap.has(key)) sessionMap.set(key, { session: r.session, semester: r.semester, results: [] });
       sessionMap.get(key).results.push(r);
     }
 
     const sessionBreakdown = [...sessionMap.values()]
-      .map(({ session, semester, results }) => ({
-        session,
-        semester,
-        ...computeSessionGpa(results),
-      }))
-      .sort((a, b) => {
-        const an = a.session?.name || "";
-        const bn = b.session?.name || "";
-        return an.localeCompare(bn) || a.semester.localeCompare(b.semester);
-      });
+      .map(({ session, semester, results }) => ({ session, semester, ...computeSessionGpa(results) }))
+      .sort(
+        (a, b) =>
+          (a.session?.name || "").localeCompare(b.session?.name || "") ||
+          a.semester.localeCompare(b.semester)
+      );
 
     const localCumulative = computeCgpa(results);
     const carryovers = computeCarryovers(results);
@@ -886,26 +787,43 @@ export const getMyGpa = async (req, res) => {
 
     if (user.isTransferStudent && user.transferCgpa && user.transferCredits) {
       const transferPoints = user.transferCgpa * user.transferCredits;
-
       finalUnits = localCumulative.units + user.transferCredits;
       finalPoints = localCumulative.points + transferPoints;
-
       finalCgpa = finalUnits > 0 ? +(finalPoints / finalUnits).toFixed(2) : 0;
+    }
+
+    const currentCalculated = {
+      sessionBreakdown: sessionBreakdown.map((s) => ({
+        session: s.session?.name,
+        semester: s.semester,
+        gpa: s.gpa,
+        units: s.units,
+        points: s.points,
+      })),
+      cumulative: { units: finalUnits, points: finalPoints, gpa: finalCgpa },
+    };
+
+    // Sync the cached GPA on the user document if it drifted
+    const cached = user.gpaCache;
+    const needsUpdate =
+      !cached ||
+      JSON.stringify(cached.cumulative) !== JSON.stringify(currentCalculated.cumulative) ||
+      JSON.stringify(cached.sessionBreakdown) !== JSON.stringify(currentCalculated.sessionBreakdown);
+
+    if (needsUpdate) {
+      user.gpaCache = {
+        sessionBreakdown: currentCalculated.sessionBreakdown,
+        cumulative: currentCalculated.cumulative,
+        updatedAt: new Date(),
+      };
+      await user.save();
+      console.log(`[GPA Sync] Recalculated and updated cache for ${user.matricNumber}`);
     }
 
     return res.json({
       sessionBreakdown,
-      cumulative: {
-        units: finalUnits,
-        points: finalPoints,
-        gpa: finalCgpa,
-      },
-      transferData: user.isTransferStudent
-        ? {
-            cgpa: user.transferCgpa,
-            credits: user.transferCredits,
-          }
-        : null,
+      cumulative: { units: finalUnits, points: finalPoints, gpa: finalCgpa },
+      transferData: user.isTransferStudent ? { cgpa: user.transferCgpa, credits: user.transferCredits } : null,
       carryovers,
       totalCourses: new Set(results.map((r) => r.courseCode)).size,
     });
@@ -930,13 +848,9 @@ export const getStudentResults = async (req, res) => {
     if (!isAdmin && !isHod) {
       const lecturerHasStudent = await Result.exists({
         student: student._id,
-        offering: {
-          $in: await CourseOffering.find({ lecturer: req.user.id }).distinct("_id"),
-        },
+        offering: { $in: await CourseOffering.find({ lecturer: req.user.id }).distinct("_id") },
       });
-      if (!lecturerHasStudent) {
-        return res.status(403).json({ message: "Not allowed" });
-      }
+      if (!lecturerHasStudent) return res.status(403).json({ message: "Not allowed" });
     }
 
     const results = await Result.find({ student: student._id, isPublished: true })
@@ -965,40 +879,22 @@ export const getStudentResults = async (req, res) => {
 
 export const getOfferingResults = async (req, res) => {
   try {
-    const offering = await CourseOffering.findById(req.params.offeringId).populate(
-      "course",
-      "code title units"
-    );
+    const offering = await CourseOffering.findById(req.params.offeringId).populate("course", "code title units");
     if (!offering) return res.status(404).json({ message: "Offering not found" });
 
-    const isRep = await CourseRep.exists({
-      user: req.user.id,
-      offering: offering._id,
-      isActive: true,
-    });
-
+    const isRep = await CourseRep.exists({ user: req.user.id, offering: offering._id, isActive: true });
     if (!(await userCanManageOffering(req.user, offering)) && !isRep) {
       return res.status(403).json({ message: "Not allowed" });
     }
 
-    const results = await Result.find({
-      offering: offering._id,
-      isPublished: true,
-    })
+    const results = await Result.find({ offering: offering._id, isPublished: true })
       .populate("student", "name matricNumber level")
       .sort({ createdAt: -1 });
 
     return res.json({
-      offering: {
-        id: offering._id,
-        course: offering.course,
-        level: offering.level,
-      },
+      offering: { id: offering._id, course: offering.course, level: offering.level },
       count: results.length,
-      results: results.map((r) => ({
-        ...sanitizeResult(r),
-        student: r.student,
-      })),
+      results: results.map((r) => ({ ...sanitizeResult(r), student: r.student })),
     });
   } catch (err) {
     console.error("getOfferingResults error:", err);

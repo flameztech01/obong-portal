@@ -15,15 +15,14 @@ const TEXT_CANDIDATES = unique([
   "openai/gpt-oss-120b",
   "openai/gpt-oss-20b",
   "qwen/qwen3.8-27b",
-  "llama-3.3-70b-versatile", 
-  "llama-3.1-8b-instant", 
+  "llama-3.3-70b-versatile",
+  "llama-3.1-8b-instant",
 ]);
 
+// (llama-3.2-*-vision-preview removed: decommissioned)
 const VISION_CANDIDATES = unique([
   process.env.GROQ_VISION_MODEL,
   ...splitEnv(process.env.GROQ_VISION_MODELS),
-  "llama-3.2-90b-vision-preview",
-  "llama-3.2-11b-vision-preview",
   "qwen/qwen3.8-27b",
 ]);
 
@@ -39,6 +38,7 @@ const MODEL_MAX_COMPLETION = {
 };
 
 const DEFAULT_MAX_TOKENS = 8192;
+const MIN_MAX_TOKENS = 2048;
 const DEFAULT_TEMPERATURE = 0.2;
 const MAX_DOC_CHARS = Number(process.env.GROQ_MAX_DOC_CHARS) || 60000;
 
@@ -115,6 +115,14 @@ const errInfo = (err) => {
   return { status, code: String(code), message };
 };
 
+const isTooLarge = (err) => {
+  const { status, message } = errInfo(err);
+  return (
+    status === 413 ||
+    /request too large|reduce your message size|requested \d+/i.test(message)
+  );
+};
+
 const shouldSwitchModel = (err) => {
   const { status, code, message } = errInfo(err);
   if (status === 404 || status === 413 || status === 429) return true;
@@ -169,7 +177,14 @@ const extractPdfText = async (buffer) => {
 
 const fetchPdfText = async (url) => {
   const res = await fetch(url);
-  if (!res.ok) throw new Error(`Failed to fetch PDF (HTTP ${res.status})`);
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        `Could not download PDF (HTTP ${res.status}). Cloudinary may be blocking PDF delivery — enable "Allow delivery of PDF and ZIP files" in Cloudinary Settings > Security.`
+      );
+    }
+    throw new Error(`Failed to fetch PDF (HTTP ${res.status})`);
+  }
   const buffer = Buffer.from(await res.arrayBuffer());
   const text = (await extractPdfText(buffer)).trim();
   if (text.length < 10) {
@@ -182,11 +197,34 @@ const fetchPdfText = async (url) => {
     : text;
 };
 
-const urlToDataUri = async (url, mimeType) => {
+const urlToDataUri = async (url, fallbackMime = "image/jpeg") => {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Failed to fetch image (HTTP ${res.status})`);
+  const mime = res.headers.get("content-type")?.split(";")[0] || fallbackMime;
   const buffer = Buffer.from(await res.arrayBuffer());
-  return `data:${mimeType};base64,${buffer.toString("base64")}`;
+  return `data:${mime};base64,${buffer.toString("base64")}`;
+};
+
+// Replace every remote image URL in the messages with an inline base64 data URI.
+const inlineRemoteImages = async (messages) => {
+  const out = [];
+  for (const m of messages) {
+    if (!Array.isArray(m.content)) {
+      out.push(m);
+      continue;
+    }
+    const content = [];
+    for (const part of m.content) {
+      const url = part?.type === "image_url" ? part.image_url?.url : null;
+      if (url && /^https?:\/\//i.test(url)) {
+        content.push({ type: "image_url", image_url: { url: await urlToDataUri(url) } });
+      } else {
+        content.push(part);
+      }
+    }
+    out.push({ ...m, content });
+  }
+  return out;
 };
 
 const buildDocumentUserMessage = async (fileUrl, mimeType, prompt) => {
@@ -202,7 +240,6 @@ const buildDocumentUserMessage = async (fileUrl, mimeType, prompt) => {
           ],
         },
       ],
-      imageFallback: { fileUrl, mimeType, prompt },
     };
   }
   if (mimeType === "application/pdf") {
@@ -210,10 +247,7 @@ const buildDocumentUserMessage = async (fileUrl, mimeType, prompt) => {
     return {
       kind: "text",
       messages: [
-        {
-          role: "user",
-          content: `${prompt}\n\n--- DOCUMENT TEXT ---\n${text}`,
-        },
+        { role: "user", content: `${prompt}\n\n--- DOCUMENT TEXT ---\n${text}` },
       ],
     };
   }
@@ -255,7 +289,6 @@ const runChat = async ({
   jsonMode = false,
   maxTokens = DEFAULT_MAX_TOKENS,
   temperature = DEFAULT_TEMPERATURE,
-  imageFallback = null,
 }) => {
   const candidates = await resolveCandidates(kind);
 
@@ -268,6 +301,7 @@ const runChat = async ({
   }
 
   let lastError = null;
+  const failures = [];
 
   for (const model of candidates) {
     let currentMessages = messages;
@@ -277,7 +311,7 @@ const runChat = async ({
     let triedDataUri = false;
     let triedMoreTokens = false;
 
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (let attempt = 0; attempt < 6; attempt++) {
       try {
         const { content, finishReason } = await callGroq({
           model,
@@ -313,47 +347,50 @@ const runChat = async ({
           continue;
         }
 
+        // Model couldn't fetch the remote image URL -> send images inline as base64
         if (
           kind === "vision" &&
-          imageFallback &&
           !triedDataUri &&
           status === 400 &&
           /image|url|fetch|download/i.test(message)
         ) {
           triedDataUri = true;
           try {
-            const dataUri = await urlToDataUri(imageFallback.fileUrl, imageFallback.mimeType);
-            currentMessages = [
-              {
-                role: "user",
-                content: [
-                  { type: "text", text: imageFallback.prompt },
-                  { type: "image_url", image_url: { url: dataUri } },
-                ],
-              },
-            ];
+            currentMessages = await inlineRemoteImages(currentMessages);
             continue;
           } catch (fetchErr) {
             lastError = fetchErr;
+            failures.push(`${model}: ${fetchErr.message}`);
             break;
           }
         }
 
+        // Request too big for this tier: shrink reserved output before abandoning the model
+        if (isTooLarge(err) && currentMaxTokens > MIN_MAX_TOKENS) {
+          currentMaxTokens = Math.max(Math.floor(currentMaxTokens / 2), MIN_MAX_TOKENS);
+          console.warn(`[groq] ${model} request too large, retrying with max_tokens=${currentMaxTokens}`);
+          continue;
+        }
+
         if (shouldSwitchModel(err)) {
           if (isModelGone(err)) markDead(model);
-          console.warn(
-            `[groq] ${model} failed (${status || "?"}): ${message.slice(0, 160)}. Trying next model...`
-          );
+          const line = `${model} failed (${status || "?"}): ${message.slice(0, 200)}`;
+          failures.push(line);
+          console.warn(`[groq] ${line}. Trying next model...`);
           break;
         }
 
-        if (/returned an empty response/.test(message)) break;
+        if (/returned an empty response/.test(message)) {
+          failures.push(`${model}: empty response`);
+          break;
+        }
 
         throw err;
       }
     }
   }
 
+  console.error("[groq] ALL MODELS FAILED:\n - " + failures.join("\n - "));
   throw lastError || new Error("All Groq models failed");
 };
 
@@ -378,9 +415,10 @@ const safeJsonParse = (raw) => {
 };
 
 /* ============================================================
-   NORMALIZERS (session / semester)
+   NORMALIZERS (session / semester / level)
    ============================================================ */
 
+// "2023/2024", "2023-2024", "2023/24", "SESSION: 2023/2024" → "2023/2024"
 const normalizeSession = (value) => {
   if (value === null || value === undefined) return null;
   const m = String(value).match(/(\d{4})\s*[\/\\\-]\s*(\d{2,4})/);
@@ -391,12 +429,20 @@ const normalizeSession = (value) => {
   return `${start}/${end}`;
 };
 
+// "1ST SEMESTER", "SEMESTER ONE", "First" → "first" ; "2ND", "SEMESTER TWO" → "second"
 const normalizeSemester = (value) => {
   if (value === null || value === undefined) return null;
   const s = String(value).toLowerCase();
-  if (/\b(1st|first|1)\b/.test(s)) return "first";
-  if (/\b(2nd|second|2)\b/.test(s)) return "second";
+  if (/\b(1st|first|one|1)\b/.test(s)) return "first";
+  if (/\b(2nd|second|two|2)\b/.test(s)) return "second";
   return null;
+};
+
+// "LEVEL 100", "EVEL 200", 300, "400L" → 100..500
+const normalizeLevel = (value) => {
+  if (value === null || value === undefined) return null;
+  const m = String(value).match(/([1-5])\s*0\s*0/);
+  return m ? Number(`${m[1]}00`) : null;
 };
 
 const mostCommon = (arr) => {
@@ -438,8 +484,8 @@ Rules:
 - If multiple semesters are present, use the most recent/current semester.
 - Return ONLY the JSON object.`;
 
-  const { kind, messages, imageFallback } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, imageFallback });
+  const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
+  const raw = await runChat({ kind, messages, jsonMode: true });
   const parsed = safeJsonParse(raw);
 
   const pickDate = (key) => {
@@ -460,20 +506,40 @@ Rules:
   };
 };
 
-export const parseResultDocument = async ({ fileUrl, mimeType, mode, courseCode, courseTitle, units }) => {
+// Accepts multiple files (pages): files = [{ url, mimeType }, ...]
+// Also still accepts legacy single { fileUrl, mimeType }.
+export const parseResultDocument = async ({
+  files,
+  fileUrl,
+  mimeType,
+  mode,
+  courseCode,
+  courseTitle,
+  units,
+}) => {
   const isLecturer = mode === "lecturer";
+
+  const fileList =
+    Array.isArray(files) && files.length
+      ? files
+      : fileUrl
+      ? [{ url: fileUrl, mimeType }]
+      : [];
+
+  if (!fileList.length) throw new Error("No files were provided to parse.");
 
   const context = isLecturer
     ? `This is a result sheet for ONE specific course: ${courseCode}. Every row is for the SAME course.`
-    : `This is a student transcript covering MULTIPLE courses. The document may contain multiple tables (e.g., 1st Semester, 2nd Semester) and possibly multiple academic sessions.`;
+    : `This is a student transcript covering MULTIPLE courses, possibly across MULTIPLE pages/images (for example one page per level). Each page may contain a "SEMESTER ONE" table and a "SEMESTER TWO" table, often placed SIDE BY SIDE (left table = semester one, right table = semester two), or one below the other.`;
 
   const prompt = `You are an expert OCR AI parsing a university transcript. ${context}
 
-Extract every student result row from the data tables. Return ONLY valid JSON:
+Extract every course row from the data tables of ALL provided pages. Return ONLY valid JSON:
 
 {
   "rows": [
     {
+      "level": 100 | 200 | 300 | 400 | 500 | null,
       "session": "YYYY/YYYY" | null,
       "semester": "first" | "second" | null,
       "courseCode": "string | null",
@@ -485,25 +551,75 @@ Extract every student result row from the data tables. Return ONLY valid JSON:
   ]
 }
 
-🚨 CRITICAL RULES — READ CAREFULLY:
-1. EXTRACT EVERY SINGLE ROW: Do NOT skip any courses. If there are two tables (1ST SEMESTER and 2ND SEMESTER), you must extract the rows from BOTH tables.
-2. UNITS vs S/N: The transcript has a column for "S/N" (Serial Number) and a column for "COURSE UNIT". DO NOT confuse them. "S/N" is 1, 2, 3... The "COURSE UNIT" is usually 2 or 3. Use the "COURSE UNIT" column for the "units" field.
-3. SELF-CHECK: Before you finish, count the number of course rows you extracted. Check if it matches the total number of courses on the page (e.g., if there are 15 rows, your JSON must have exactly 15 objects).
-4. Look for columns like "COURSE CODE", "COURSE TITLE", "COURSE UNIT", "GRADE (100)" (or "SCORE"), and "LETTER GRADE" (or "GRADE").
-5. Map the numerical score (e.g. 78) to the "score" field. Map the letter (e.g. A) to the "grade" field.
-6. ${isLecturer ? `Use "${courseCode}" and "${units}" for every row.` : `Extract the real code and units printed on the page.`}
-7. SESSION: find the academic session printed on the document (e.g. "SESSION: 2023/2024") and put it in every row's "session" as "YYYY/YYYY".
-8. SEMESTER: "1ST SEMESTER" / "FIRST SEMESTER" → "first". "2ND SEMESTER" / "SECOND SEMESTER" → "second".
-9. Ignore the grading-scale / classification tables at the bottom of the page (e.g., the table showing 76-100 = A = 5.00). They are NOT course rows.
-10. Return ONLY the JSON object. No markdown, no comments.`;
+CRITICAL RULES:
+1. You MUST extract every single course row from ALL tables on ALL pages. Do not skip rows, and do not merge pages.
+2. Look for columns like "COURSE CODE", "COURSE TITLE", "COURSE UNIT" / "CREDIT UNIT" (or "UNIT"), "GRADE (100)" (or "SCORE"), and "LETTER GRADE" (or "GRADE"). Ignore S/N serial numbers and the "GP" / "CP" / "GRADE POINT" columns.
+3. Map the numerical score (e.g. 78) to "score", the letter (e.g. A) to "grade", and the credit unit (e.g. 2) to "units". If only one of score/grade exists, leave the other null.
+4. ${isLecturer ? `Use "${courseCode}" and "${units}" for every row.` : `Extract the real code and units printed on the page.`}
+5. LEVEL: read the level heading of each page or section (e.g. "LEVEL 100", "EVEL 200" which is a typo for LEVEL 200, "100 LEVEL", "YEAR ONE" = 100, "YEAR TWO" = 200). Put it in every row's "level" as 100, 200, 300, 400 or 500. Rows from different pages with different levels MUST have different "level" values.
+6. SESSION: ONLY set "session" if an academic session such as "2023/2024" is actually PRINTED on that page or section, written as "YYYY/YYYY". If no session is printed, set "session" to null. NEVER guess or invent a session.
+7. SEMESTER: use the heading above each table. "1ST SEMESTER" / "FIRST SEMESTER" / "SEMESTER ONE" (even if prefixed by words like "PREPARATORY:") → "first". "2ND SEMESTER" / "SECOND SEMESTER" / "SEMESTER TWO" → "second". Every row in a table gets that table's semester.
+8. Ignore summary lines (semester credits, grade points, GPA, CGPA), the year/CGPA summary table and the grading-scale legend. They are NOT course rows.
+9. Return ONLY the JSON object. No markdown, no comments.`;
 
-  const { kind, messages, imageFallback } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 16384, imageFallback });
+  const imageParts = [];
+  let combinedPdfText = "";
+
+  for (const f of fileList) {
+    const url = f?.url || f?.secure_url || f?.fileUrl;
+    const mime = f?.mimeType || f?.mimetype || "";
+    if (!url) continue;
+
+    if (mime.startsWith("image/")) {
+      imageParts.push({ type: "image_url", image_url: { url } });
+    } else if (mime === "application/pdf") {
+      const text = await fetchPdfText(url);
+      combinedPdfText += `\n\n--- PDF PAGE ---\n\n${text}`;
+    } else {
+      throw new Error(`Unsupported file type: ${mime || "unknown"}`);
+    }
+  }
+
+  if (!imageParts.length && !combinedPdfText.trim()) {
+    throw new Error("No readable files were provided.");
+  }
+
+  let kind;
+  let messages;
+
+  if (imageParts.length) {
+    kind = "vision";
+    const text = combinedPdfText.trim()
+      ? `${prompt}\n\n--- EXTRA PDF TEXT ---${combinedPdfText}`
+      : prompt;
+    messages = [{ role: "user", content: [{ type: "text", text }, ...imageParts] }];
+  } else {
+    kind = "text";
+    messages = [{ role: "user", content: `${prompt}\n\n--- DOCUMENT TEXT ---${combinedPdfText}` }];
+  }
+
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 16384 });
   const parsed = safeJsonParse(raw);
 
   const rawRows = Array.isArray(parsed?.rows) ? parsed.rows : [];
 
-  const documentSession = mostCommon(rawRows.map((r) => normalizeSession(r?.session)));
+  // Fallback session is chosen PER LEVEL, so different levels never get merged into one session.
+  // Rows with no level fall back to the most common session overall.
+  const sessionByLevel = new Map();
+  const levels = [...new Set(rawRows.map((r) => normalizeLevel(r?.level)).filter(Boolean))];
+  for (const lvl of levels) {
+    sessionByLevel.set(
+      lvl,
+      mostCommon(
+        rawRows
+          .filter((r) => normalizeLevel(r?.level) === lvl)
+          .map((r) => normalizeSession(r?.session))
+      )
+    );
+  }
+  const globalSession = levels.length
+    ? null
+    : mostCommon(rawRows.map((r) => normalizeSession(r?.session)));
 
   const rows = rawRows.map((r) => {
     const scoreNum =
@@ -512,6 +628,7 @@ Extract every student result row from the data tables. Return ONLY valid JSON:
         : null;
     const gradeRaw = r.grade ? String(r.grade).toUpperCase().trim() : null;
     const grade = ["A", "B", "C", "D", "E", "F"].includes(gradeRaw) ? gradeRaw : null;
+    const level = isLecturer ? null : normalizeLevel(r.level);
 
     return {
       matricNumber: null,
@@ -520,7 +637,12 @@ Extract every student result row from the data tables. Return ONLY valid JSON:
       units: isLecturer ? units : r.units != null ? Number(r.units) : null,
       score: scoreNum,
       grade,
-      session: isLecturer ? null : normalizeSession(r.session) || documentSession,
+      level,
+      session: isLecturer
+        ? null
+        : normalizeSession(r.session) ||
+          (level ? sessionByLevel.get(level) : globalSession) ||
+          null,
       semester: isLecturer ? null : normalizeSemester(r.semester),
       matched: false,
       warnings: [],
@@ -532,8 +654,8 @@ Extract every student result row from the data tables. Return ONLY valid JSON:
 
 export const summarizeContent = async ({ fileUrl, mimeType, title }) => {
   const prompt = `Summarize the study material titled "${title}". Return JSON: { "summary": "", "keyPoints": [], "definitions": [{"term": "", "definition": ""}], "questionsToConsider": [] }`;
-  const { kind, messages, imageFallback } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192, imageFallback });
+  const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192 });
   return safeJsonParse(raw);
 };
 
@@ -541,12 +663,13 @@ export const chatAboutContent = async ({ fileUrl, mimeType, materialTitle, histo
   const systemPrompt = `You are a friendly study assistant for "${materialTitle}".`;
   let contextContent;
   let kind;
-  let imageFallback = null;
 
   if (mimeType?.startsWith("image/")) {
     kind = "vision";
-    contextContent = [{ type: "text", text: "Here is the material:" }, { type: "image_url", image_url: { url: fileUrl } }];
-    imageFallback = { fileUrl, mimeType, prompt: "Here is the material:" };
+    contextContent = [
+      { type: "text", text: "Here is the material:" },
+      { type: "image_url", image_url: { url: fileUrl } },
+    ];
   } else if (mimeType === "application/pdf") {
     kind = "text";
     contextContent = `Here is the material:\n\n${await fetchPdfText(fileUrl)}`;
@@ -562,23 +685,23 @@ export const chatAboutContent = async ({ fileUrl, mimeType, materialTitle, histo
     { role: "user", content: String(userMessage).slice(0, 4000) },
   ];
 
-  return runChat({ kind, messages, maxTokens: 4096, temperature: 0.4, imageFallback });
+  return runChat({ kind, messages, maxTokens: 4096, temperature: 0.4 });
 };
 
 export const generateQuizQuestions = async ({ fileUrl, mimeType, materialTitle, count = 5, types = ["mcq"], marksPerQuestion = 1 }) => {
   const prompt = `Generate ${count} quiz questions from "${materialTitle}". Return JSON: { "questions": [{ "type": "mcq" | "theory", "question": "", "options": [], "correctAnswer": "", "modelAnswer": "", "marks": ${marksPerQuestion} }] }`;
-  const { kind, messages, imageFallback } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192, imageFallback });
+  const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192 });
   const parsed = safeJsonParse(raw);
   return Array.isArray(parsed?.questions) ? parsed.questions : [];
 };
 
 /* ============================================================
-   NEW: PARSE COURSE ALLOCATION DOCUMENT
+   PARSE COURSE ALLOCATION DOCUMENT
    ============================================================ */
 export const parseCourseAllocationDocument = async ({ fileUrl, mimeType, session, semester }) => {
   const prompt = `You are parsing a university course allocation document.
-  
+
 Context:
 - Academic Session: ${session}
 - Semester: ${semester}
@@ -596,7 +719,7 @@ Extract every course listed in the tables. Return ONLY valid JSON:
   ]
 }
 
-🚨 CRITICAL RULES:
+CRITICAL RULES:
 1. Look for headings like "YEAR ONE", "YEAR TWO", "100 LEVEL", "200 LEVEL". Map "YEAR ONE" to 100, "YEAR TWO" to 200, "YEAR THREE" to 300, "YEAR FOUR" to 400, "YEAR FIVE" to 500.
 2. Extract the Course Code (e.g. GST 111, CSC 211), Course Title, and Credit Units.
 3. Do NOT use the "S/N" (Serial Number) column for units. The units are under the "Credit Unit" or "Units" column. Usually, this is a small number like 2, 3, or 1.
@@ -604,10 +727,9 @@ Extract every course listed in the tables. Return ONLY valid JSON:
 5. Do NOT include the "Total" rows at the bottom of the tables.
 6. Return ONLY the JSON object. No markdown, no comments.`;
 
-  const { kind, messages, imageFallback } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192, imageFallback });
+  const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192 });
   const parsed = safeJsonParse(raw);
-  
+
   return Array.isArray(parsed?.courses) ? parsed.courses : [];
 };

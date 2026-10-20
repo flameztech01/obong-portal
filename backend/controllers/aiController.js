@@ -13,45 +13,15 @@ import AuditLog from "../models/auditLogModel.js";
 import {
   parseCalendarDocument,
   parseResultDocument,
+  parseCourseAllocationDocument,
   summarizeContent,
   chatAboutContent,
   generateQuizQuestions,
-  parseCourseAllocationDocument, // 👈 NEW IMPORT
 } from "../services/groqService.js";
 
 /* ============================================================
    HELPERS
    ============================================================ */
-
-// Cloudinary helpers specifically for this controller
-const uploadFileToCloudinary = (file, folder, options = {}) => {
-  if (!file) return null;
-  return new Promise((resolve, reject) => {
-    const uploadOptions = {
-      folder,
-      resource_type: "auto",
-      ...options,
-    };
-    cloudinary.uploader
-      .upload_stream(uploadOptions, (error, result) => {
-        if (error) reject(error);
-        else resolve(result);
-      })
-      .end(file.buffer);
-  });
-};
-
-const deleteFromCloudinary = async (publicId) => {
-  if (!publicId) return null;
-  try {
-    return await cloudinary.uploader.destroy(publicId, {
-      resource_type: "auto",
-    });
-  } catch (err) {
-    console.error("Cloudinary delete failed:", err.message);
-    return null;
-  }
-};
 
 const logAudit = async (req, action, resource, resourceId, meta = {}) => {
   try {
@@ -116,6 +86,17 @@ const sanitizeError = (err) => {
   if (/timeout/i.test(msg)) return "AI service timed out";
   return msg.length > 200 ? "AI service failed. Try again." : msg;
 };
+
+const uploadBufferToCloudinary = (file, folder) =>
+  new Promise((resolve, reject) => {
+    const isPdf = file.mimetype === "application/pdf";
+    cloudinary.uploader
+      .upload_stream(
+        { folder, resource_type: isPdf ? "raw" : "auto" },
+        (error, result) => (error ? reject(error) : resolve(result))
+      )
+      .end(file.buffer);
+  });
 
 /* ============================================================
    1. PARSE CALENDAR
@@ -182,7 +163,7 @@ export const parseCalendar = async (req, res) => {
    2. PARSE RESULT
    ============================================================ */
 
-// @desc    AI-parse a result upload and match matric numbers
+// @desc    AI-parse a result upload (one or many pages) and match matric numbers
 // @route   POST /api/ai/parse/result
 // @access  Uploader / Admin / assigned lecturer / HOD
 export const parseResult = async (req, res) => {
@@ -194,11 +175,21 @@ export const parseResult = async (req, res) => {
 
     const upload = await ResultUpload.findById(uploadId)
       .populate("offering", "course level department semester")
-      .populate("uploadedBy", "isTransferStudent"); 
+      .populate("uploadedBy", "isTransferStudent");
 
     if (!upload) return res.status(404).json({ message: "Upload not found" });
 
-    if (!upload.fileUrl) {
+    // New multi-file format, with fallback to the legacy single file
+    const files =
+      Array.isArray(upload.fileUrls) && upload.fileUrls.length
+        ? upload.fileUrls
+            .filter((f) => f?.url)
+            .map((f) => ({ url: f.url, mimeType: f.mimeType }))
+        : upload.fileUrl
+        ? [{ url: upload.fileUrl, mimeType: upload.mimeType }]
+        : [];
+
+    if (!files.length) {
       return res
         .status(400)
         .json({ message: "Upload has no document to parse (manual rows?)" });
@@ -236,19 +227,14 @@ export const parseResult = async (req, res) => {
         }
       }
 
-      const isTransfer = upload.uploadedBy?.isTransferStudent || false;
-
       const { rows, warnings } = await parseResultDocument({
-        fileUrl: upload.fileUrl,
-        mimeType: upload.mimeType,
+        files,
         mode: upload.type,
         courseCode,
         courseTitle,
         units,
-        isTransfer, 
       });
 
-      // Match students by matricNumber
       const matricNumbers = [
         ...new Set(rows.map((r) => r.matricNumber).filter(Boolean)),
       ];
@@ -263,14 +249,15 @@ export const parseResult = async (req, res) => {
       const matchedRows = rows.map((r) => {
         const student = r.matricNumber ? studentMap.get(r.matricNumber) : null;
         const rowWarnings = [...(r.warnings || [])];
-        
+
+        // Self-uploads: the row belongs to the uploader, no matric match needed
         if (upload.type === "self") {
-            return {
-                ...r,
-                student: upload.uploadedBy._id,
-                matched: true,
-                warnings: rowWarnings,
-            };
+          return {
+            ...r,
+            student: upload.uploadedBy._id,
+            matched: true,
+            warnings: rowWarnings,
+          };
         }
 
         if (!student) rowWarnings.push("No student found with this matric number");
@@ -304,6 +291,7 @@ export const parseResult = async (req, res) => {
         rows: matchedRows.length,
         matched: matchedCount,
         needsReview,
+        files: files.length,
       });
 
       return res.json({
@@ -331,6 +319,86 @@ export const parseResult = async (req, res) => {
   } catch (err) {
     console.error("parseResult error:", err);
     return res.status(500).json({ message: "Server error" });
+  }
+};
+
+/* ============================================================
+   2B. PARSE COURSE ALLOCATION DOCUMENT
+   ============================================================ */
+
+// @desc    AI-parse a course allocation PDF/image into a course list
+// @route   POST /api/ai/parse/courses
+// @access  Admin / HOD
+export const parseCourseDocument = async (req, res) => {
+  let uploaded = null;
+  let resourceType = "image";
+
+  try {
+    const isAdmin = req.user.role === "admin";
+    const isHod = req.user.extraRoles?.includes("hod");
+    if (!isAdmin && !isHod) {
+      return res.status(403).json({ message: "Not allowed" });
+    }
+
+    const file =
+      req.files?.document?.[0] ||
+      (Array.isArray(req.files) ? req.files[0] : null) ||
+      req.file;
+    if (!file) return res.status(400).json({ message: "No document provided" });
+
+    const { session, semester } = req.body;
+    if (!session || !semester) {
+      return res.status(400).json({ message: "session and semester are required" });
+    }
+
+    resourceType = file.mimetype === "application/pdf" ? "raw" : "image";
+
+    try {
+      uploaded = await uploadBufferToCloudinary(file, "school_portal/course_allocations");
+    } catch (cloudErr) {
+      console.error("parseCourseDocument cloudinary error:", cloudErr);
+      return res
+        .status(500)
+        .json({ message: `Cloudinary Error: ${cloudErr.message || "upload failed"}` });
+    }
+
+    try {
+      const courses = await parseCourseAllocationDocument({
+        fileUrl: uploaded.secure_url,
+        mimeType: file.mimetype,
+        session,
+        semester,
+      });
+
+      await logAudit(req, "ai_parse", "course_allocation", null, {
+        courses: courses.length,
+      });
+
+      return res.json({
+        message: "Course document parsed. Review before saving.",
+        courses,
+      });
+    } catch (aiErr) {
+      console.error("parseCourseDocument AI error:", aiErr);
+      return res.status(500).json({
+        message: "AI failed to parse course document",
+        error: sanitizeError(aiErr),
+      });
+    }
+  } catch (err) {
+    console.error("parseCourseDocument error:", err);
+    return res.status(500).json({ message: "Server error" });
+  } finally {
+    // The file is only needed for parsing
+    if (uploaded?.public_id) {
+      try {
+        await cloudinary.uploader.destroy(uploaded.public_id, {
+          resource_type: resourceType,
+        });
+      } catch (e) {
+        console.error("Cloudinary cleanup failed:", e.message);
+      }
+    }
   }
 };
 
@@ -376,9 +444,7 @@ export const summarizeMaterial = async (req, res) => {
       });
     } catch (aiErr) {
       console.error("summarizeMaterial AI error:", aiErr);
-      return res
-        .status(500)
-        .json({ message: sanitizeError(aiErr) });
+      return res.status(500).json({ message: sanitizeError(aiErr) });
     }
   } catch (err) {
     console.error("summarizeMaterial error:", err);
@@ -584,61 +650,6 @@ export const generateQuiz = async (req, res) => {
     }
   } catch (err) {
     console.error("generateQuiz error:", err);
-    return res.status(500).json({ message: "Server error" });
-  }
-};
-
-/* ============================================================
-   6. PARSE COURSE ALLOCATION PDF (NEW)
-   ============================================================ */
-
-// @desc    AI-parse a course allocation document (PDF/Image)
-// @route   POST /api/ai/parse/courses
-// @access  Admin / Student Admin
-export const parseCourseDocument = async (req, res) => {
-  try {
-    // 1. Permission check: Admin or Student Admin only
-    const isAdmin = req.user.role === "admin";
-    const isStudentAdmin = req.user.extraRoles?.includes("student_admin");
-    if (!isAdmin && !isStudentAdmin) {
-      return res.status(403).json({ message: "Not allowed" });
-    }
-
-    const file = req.files?.document?.[0];
-    if (!file) return res.status(400).json({ message: "No document provided" });
-
-    const { session, semester } = req.body;
-    if (!session || !semester) {
-      return res.status(400).json({ message: "Session and semester are required" });
-    }
-
-    // 2. Upload temporarily to Cloudinary so the AI can read the URL
-    const upload = await uploadFileToCloudinary(file, "school_portal/course_allocations");
-
-    try {
-      // 3. Call Groq AI to extract the courses
-      const courses = await parseCourseAllocationDocument({
-        fileUrl: upload.secure_url,
-        mimeType: file.mimetype,
-        session,
-        semester
-      });
-
-      // 4. Delete from Cloudinary immediately to save space (we don't need to store the PDF)
-      await deleteFromCloudinary(upload.public_id);
-
-      return res.json({
-        message: "Document parsed successfully",
-        courses
-      });
-    } catch (aiErr) {
-      // Clean up Cloudinary if AI fails
-      await deleteFromCloudinary(upload.public_id);
-      console.error("parseCourseDocument AI error:", aiErr);
-      return res.status(500).json({ message: sanitizeError(aiErr) });
-    }
-  } catch (err) {
-    console.error("parseCourseDocument error:", err);
     return res.status(500).json({ message: "Server error" });
   }
 };

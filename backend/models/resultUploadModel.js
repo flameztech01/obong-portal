@@ -12,6 +12,7 @@ const parsedRowSchema = new Schema(
     units: { type: Number, default: null },
     score: { type: Number, default: null },
     grade: { type: String, default: null },
+    level: { type: Number, default: null }, // 100, 200, ... (as printed on the transcript)
     session: { type: String, default: null }, // session NAME (for self-uploads)
     semester: {
       type: String,
@@ -20,6 +21,16 @@ const parsedRowSchema = new Schema(
     },
     matched: { type: Boolean, default: false },
     warnings: { type: [String], default: [] },
+  },
+  { _id: false }
+);
+
+const fileSchema = new Schema(
+  {
+    url: { type: String, required: true },
+    publicId: { type: String, default: null },
+    mimeType: { type: String, default: null },
+    originalName: { type: String, default: null },
   },
   { _id: false }
 );
@@ -60,6 +71,10 @@ const resultUploadSchema = new Schema(
       default: null,
     },
 
+    // Multi-page uploads
+    fileUrls: { type: [fileSchema], default: [] },
+
+    // Legacy single-file fields (old drafts)
     fileUrl: { type: String, default: null },
     filePublicId: { type: String, default: null, select: false },
     originalName: { type: String, default: null },
