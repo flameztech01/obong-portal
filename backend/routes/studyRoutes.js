@@ -19,7 +19,7 @@ import {
   getAttempt,
   gradeAttempt,
 } from "../controllers/studyController.js";
-import { protect } from "../Middleware/authMiddleware.js";
+import { protect } from "../middleware/authMiddleware.js";
 
 import multer from "multer";
 import { v2 as cloudinary } from "cloudinary";
