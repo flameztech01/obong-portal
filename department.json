@@ -1,0 +1,20 @@
+[
+  {
+    "_id": { "$oid": "65f1a2b3c4d5e6f7a8b9c0d1" },
+    "name": "Computer Science",
+    "code": "CSC",
+    "description": "Department of Computer Science",
+    "isActive": true,
+    "createdAt": { "$date": "2024-01-01T00:00:00.000Z" },
+    "updatedAt": { "$date": "2024-01-01T00:00:00.000Z" }
+  },
+  {
+    "_id": { "$oid": "65f1a2b3c4d5e6f7a8b9c0d2" },
+    "name": "Mass Communication",
+    "code": "MAC",
+    "description": "Department of Mass Communication",
+    "isActive": true,
+    "createdAt": { "$date": "2024-01-01T00:00:00.000Z" },
+    "updatedAt": { "$date": "2024-01-01T00:00:00.000Z" }
+  }
+]
