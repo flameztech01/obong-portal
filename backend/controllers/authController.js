@@ -4,7 +4,7 @@ import { v2 as cloudinary } from "cloudinary";
 import User from "../models/userModel.js";
 import Department from "../models/departmentModel.js";
 import Settings from "../models/settingsModel.js";
-import generateToken from "../utils/generateToken.js";
+import generateToken from "../utils/GenerateToken.js";
 import { sendOtpEmail } from "../services/emailService.js";
 
 /* ---------- cloudinary helper ---------- */
