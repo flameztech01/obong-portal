@@ -1,1 +1,41 @@
 @import "tailwindcss";
+
+/* =========================================
+   1. DISABLE AUTO-ZOOM ON INPUT FOCUS
+   ========================================= */
+/* This prevents the double-tap zoom and focus zoom on mobile 
+   without changing the font size of your inputs */
+input, 
+select, 
+textarea {
+  touch-action: manipulation;
+  -webkit-text-size-adjust: 100%;
+}
+
+/* =========================================
+   2. CUSTOM THIN SCROLLBARS
+   ========================================= */
+/* For WebKit (Chrome, Safari, Edge) */
+::-webkit-scrollbar {
+  width: 6px;   /* Vertical scrollbar width */
+  height: 6px;  /* Horizontal scrollbar height */
+}
+
+::-webkit-scrollbar-track {
+  background: transparent; 
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3f3f46; /* Tailwind zinc-700 */
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #52525b; /* Tailwind zinc-600 */
+}
+
+/* For Firefox */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #3f3f46 transparent;
+}
