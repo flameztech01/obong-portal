@@ -25,6 +25,7 @@ const allowedOrigins = [
   'http://localhost:2000',
   'http://localhost:5173',
   'http://localhost:3000',
+  'https://obongportal.lovohcreate.com',
 ];
 
 app.use(cors({
