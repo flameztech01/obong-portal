@@ -8,7 +8,8 @@ import {
   FileText, 
   Award, 
   BookOpen, 
-  TrendingUp 
+  TrendingUp,
+  CalendarDays
 } from 'lucide-react';
 import { useGetMyResultsQuery, useGetMyGpaQuery } from '../features/resultApiSlice';
 
@@ -24,13 +25,14 @@ const Results = () => {
   const { data: gpaData, isLoading: isGpaLoading } = useGetMyGpaQuery();
   const { data: resultsData, isLoading: isResultsLoading } = useGetMyResultsQuery();
 
-  // State to track which semester is expanded (default to null)
+  // State to track which semester is expanded
   const [expandedSemester, setExpandedSemester] = useState(null);
 
   const results = resultsData?.results || [];
   const carryovers = gpaData?.carryovers || [];
+  const sessionBreakdown = gpaData?.sessionBreakdown || [];
 
-  // 2. Group results by Session and Semester
+  // 2. Group detailed courses by Session and Semester
   const groupedResults = useMemo(() => {
     const groups = {};
 
@@ -159,10 +161,33 @@ const Results = () => {
       </div>
 
       {/* =========================================
+          👇 NEW: ACADEMIC HISTORY (Past GPAs)
+          ========================================= */}
+      {sessionBreakdown.length > 0 && (
+        <div className="mt-8">
+          <h2 className="text-lg font-serif text-white tracking-tight mb-3">Semester GPA Breakdown</h2>
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-3">
+            {sessionBreakdown.map((sem, idx) => (
+              <div key={idx} className="bg-zinc-900 border border-zinc-800 rounded-xl p-4 flex items-center justify-between hover:border-zinc-700 transition-colors">
+                <div>
+                  <p className="text-sm font-bold text-white uppercase tracking-wide">{sem.session?.name || 'Session'}</p>
+                  <p className="text-xs text-zinc-400 capitalize">{sem.semester} Semester</p>
+                </div>
+                <div className="text-right">
+                  <p className="text-xl font-bold text-yellow-500">{sem.gpa.toFixed(2)}</p>
+                  <p className="text-[10px] text-zinc-500 uppercase tracking-wider">{sem.units} Units</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* =========================================
           TRANSFER STUDENT INFO (If Applicable)
           ========================================= */}
       {gpaData?.transferData?.cgpa && (
-        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4 flex items-center gap-4">
+        <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-4 flex items-center gap-4 mt-6">
           <div className="bg-yellow-500/10 p-2 rounded-lg text-yellow-500">
             <TrendingUp className="w-5 h-5" />
           </div>
@@ -179,7 +204,7 @@ const Results = () => {
           CARRYOVERS ALERT (If Applicable)
           ========================================= */}
       {carryovers.length > 0 && (
-        <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4 md:p-5 relative overflow-hidden">
+        <div className="bg-zinc-900 border border-red-500/30 rounded-xl p-4 md:p-5 relative overflow-hidden mt-6">
           <div className="absolute left-0 top-0 bottom-0 w-1 bg-red-500"></div>
           <h3 className="text-white font-medium flex items-center gap-2 mb-3">
             <AlertTriangle className="w-5 h-5 text-red-500" />
@@ -201,14 +226,19 @@ const Results = () => {
       )}
 
       {/* =========================================
-          SEMESTER BREAKDOWN (Accordion)
+          DETAILED COURSE RESULTS (Accordion)
           ========================================= */}
-      <div className="space-y-3">
-        <h2 className="text-lg font-serif text-white tracking-tight mt-6 mb-2">Semester Breakdown</h2>
+      <div className="space-y-3 mt-8">
+        <h2 className="text-lg font-serif text-white tracking-tight mb-2">Detailed Course Results</h2>
         
         {groupedResults.map((group) => {
           const isExpanded = expandedSemester === group.key;
           
+          // Find the matching semester GPA for the header
+          const semGpa = gpaData?.sessionBreakdown?.find(
+            s => s.session?.name === group.sessionName && s.semester === group.semester
+          )?.gpa;
+
           return (
             <div 
               key={group.key} 
@@ -231,7 +261,7 @@ const Results = () => {
                   <div className="text-right hidden sm:block">
                     <p className="text-[10px] text-zinc-500 uppercase tracking-wider">GPA</p>
                     <p className="text-sm font-bold text-yellow-500">
-                      {gpaData?.sessionBreakdown?.find(s => s.session?.name === group.sessionName && s.semester === group.semester)?.gpa?.toFixed(2) || '0.00'}
+                      {semGpa ? semGpa.toFixed(2) : '0.00'}
                     </p>
                   </div>
                   <div className={`w-8 h-8 rounded-full flex items-center justify-center transition-transform duration-300 ${isExpanded ? 'rotate-180 bg-zinc-800 text-white' : 'bg-zinc-800/50 text-zinc-400'}`}>
@@ -270,7 +300,7 @@ const Results = () => {
                                 course.grade === 'C' ? 'bg-yellow-500/10 text-yellow-400' :
                                 course.grade === 'D' ? 'bg-orange-500/10 text-orange-400' :
                                 course.grade === 'E' ? 'bg-zinc-500/20 text-zinc-400' :
-                                'bg-red-500/10 text-red-500' // F
+                                'bg-red-500/10 text-red-500'
                               }`}>
                                 {course.grade}
                               </span>
