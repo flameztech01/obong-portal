@@ -1,40 +1,58 @@
 @import "tailwindcss";
 
+@import url('https://fonts.googleapis.com/css2?family=Raleway:ital,wght@0,100..900;1,100..900&display=swap');
+
+* {
+  font-family: 'Raleway', sans-serif;
+}
+
 /* =========================================
-   1. DISABLE AUTO-ZOOM ON INPUT FOCUS
+   1. PREVENT MOBILE FONT BOOSTING (Android)
    ========================================= */
-/* This prevents the double-tap zoom and focus zoom on mobile 
-   without changing the font size of your inputs */
-input, 
-select, 
-textarea {
-  touch-action: manipulation;
+html {
   -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 /* =========================================
-   2. CUSTOM THIN SCROLLBARS
+   2. PREVENT iOS AUTO-ZOOM ON INPUT FOCUS
    ========================================= */
-/* For WebKit (Chrome, Safari, Edge) */
+/* iOS zooms in on focus when font-size < 16px.
+   This is the ONLY reliable fix. */
+input,
+select,
+textarea {
+  font-size: max(16px, 1em);
+  touch-action: manipulation;
+}
+
+/* Optional: only prevent visual jump, not actual size, on iOS
+   (keeps your designed small text if you really want <16px) */
+@supports (-webkit-touch-callout: none) {
+  input,
+  select,
+  textarea {
+    font-size: 16px;
+  }
+}
+
+/* =========================================
+   3. CUSTOM THIN SCROLLBARS
+   ========================================= */
 ::-webkit-scrollbar {
-  width: 6px;   /* Vertical scrollbar width */
-  height: 6px;  /* Horizontal scrollbar height */
+  width: 6px;
+  height: 6px;
 }
-
 ::-webkit-scrollbar-track {
-  background: transparent; 
+  background: transparent;
 }
-
 ::-webkit-scrollbar-thumb {
-  background: #3f3f46; /* Tailwind zinc-700 */
+  background: #3f3f46;
   border-radius: 10px;
 }
-
 ::-webkit-scrollbar-thumb:hover {
-  background: #52525b; /* Tailwind zinc-600 */
+  background: #52525b;
 }
-
-/* For Firefox */
 * {
   scrollbar-width: thin;
   scrollbar-color: #3f3f46 transparent;
