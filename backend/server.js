@@ -13,7 +13,7 @@ import resultRoutes from "./routes/resultRoutes.js";
 import studyRoutes from "./routes/studyRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
 
-import { notFound, errorHandler } from './Middleware/errorMiddleware.js';
+import { notFound, errorHandler } from './middleware/errorMiddleware.js';
 
 const app = express();
 
