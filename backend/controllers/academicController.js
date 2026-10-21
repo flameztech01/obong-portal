@@ -70,6 +70,26 @@ const logAudit = async (req, action, resource, resourceId, meta = {}) => {
 
 const getCurrentSession = () => AcademicSession.findOne({ isCurrent: true });
 
+/* ---------- session-per-level helpers ---------- */
+
+const SESSION_NAME_RE = /^(\d{4})\/(\d{4})$/;
+
+const getCurrentSessionName = async () => {
+  const current = await getCurrentSession();
+  const name = current?.name ? String(current.name).trim() : "";
+  return SESSION_NAME_RE.test(name) ? name : null;
+};
+
+// e.g. current "2026/2027", currentLevel 300, targetLevel 200 -> "2025/2026"
+const sessionNameForLevel = (currentSessionName, currentLevel, targetLevel) => {
+  const m = String(currentSessionName || "").match(SESSION_NAME_RE);
+  if (!m) return null;
+  const levelsBack = (Number(currentLevel) - Number(targetLevel)) / 100;
+  if (!Number.isInteger(levelsBack) || levelsBack < 0) return null;
+  const startYear = Number(m[1]) - levelsBack;
+  return `${startYear}/${startYear + 1}`;
+};
+
 /* ---------- permission helpers ---------- */
 
 const userCanManageCatalog = (user, departmentId, level) => {
@@ -121,7 +141,7 @@ const sanitizeCourse = (c) => ({
   department: c.department,
   level: c.level,
   semester: c.semester || null,
-  session: c.session || null, // 👈 Added session
+  session: c.session || null,
   description: c.description || "",
   createdAt: c.createdAt,
 });
@@ -179,10 +199,10 @@ const sanitizeCalendar = (c) => ({
    ============================================================ */
 
 // @desc    List courses (filter by dept, level, search)
+//          Non-admins only see courses from their own set's session per level
+//          (courses with no session are always shown)
 // @route   GET /api/academic/courses
 // @access  Auth
-// controllers/academicController.js
-
 export const listCourses = async (req, res) => {
   try {
     const { page, limit, skip } = paginate(req.query);
@@ -191,20 +211,50 @@ export const listCourses = async (req, res) => {
     const filter = {};
     if (department) filter.department = department;
     if (level) filter.level = Number(level);
-    if (session) filter.session = session; // 👈 ADDED
-    if (semester) filter.semester = semester; // 👈 ADDED
-    
+    if (session) filter.session = session;
+    if (semester) filter.semester = semester;
+
+    const and = [];
+
     if (search) {
-      filter.$or = [
-        { code: { $regex: search, $options: "i" } },
-        { title: { $regex: search, $options: "i" } },
-      ];
+      and.push({
+        $or: [
+          { code: { $regex: search, $options: "i" } },
+          { title: { $regex: search, $options: "i" } },
+        ],
+      });
     }
+
+    const currentSessionName = await getCurrentSessionName();
+    const userLevel = Number(req.user?.level);
+
+    // Session scoping for non-admins (students / student admins)
+    if (
+      req.user.role !== "admin" &&
+      currentSessionName &&
+      [100, 200, 300, 400, 500].includes(userLevel)
+    ) {
+      const levelClauses = [];
+      for (const lvl of [100, 200, 300, 400, 500]) {
+        if (lvl <= userLevel) {
+          const expected = sessionNameForLevel(currentSessionName, userLevel, lvl);
+          levelClauses.push({
+            level: lvl,
+            session: { $in: [expected, null, ""] },
+          });
+        } else {
+          levelClauses.push({ level: lvl });
+        }
+      }
+      and.push({ $or: levelClauses });
+    }
+
+    if (and.length) filter.$and = and;
 
     const [courses, total] = await Promise.all([
       Course.find(filter)
         .populate("department", "name code")
-        .sort({ session: -1, code: 1 }) // Sort by newest session first
+        .sort({ session: -1, code: 1 })
         .skip(skip)
         .limit(limit),
       Course.countDocuments(filter),
@@ -212,6 +262,7 @@ export const listCourses = async (req, res) => {
 
     return res.json({
       courses: courses.map(sanitizeCourse),
+      currentSession: currentSessionName,
       page,
       pages: Math.ceil(total / limit),
       total,
@@ -278,7 +329,7 @@ export const createCourse = async (req, res) => {
       department,
       level: Number(level),
       semester: semester || null,
-      session: session || null, // 👈 Added session
+      session: session || null,
       description: description?.trim() || "",
     });
 
@@ -329,7 +380,7 @@ export const bulkCreateCourses = async (req, res) => {
         level: Number(c.level),
         department: targetDept,
         semester: c.semester || null,
-        session: c.session || null, // 👈 Added session
+        session: c.session || null,
       });
       added.push(newCourse.code);
     }
@@ -370,7 +421,7 @@ export const updateCourse = async (req, res) => {
       course.units = Number(units);
     }
     if (semester !== undefined) course.semester = semester;
-    if (session !== undefined) course.session = session; // 👈 Added session
+    if (session !== undefined) course.session = session;
     if (description !== undefined) course.description = description?.trim() || "";
 
     await course.save();

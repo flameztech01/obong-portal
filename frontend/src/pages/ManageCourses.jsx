@@ -18,6 +18,18 @@ const Skeleton = ({ className = '' }) => (
   <div className={`animate-pulse rounded bg-zinc-800 ${className}`} />
 );
 
+const SESSION_NAME_RE = /^(\d{4})\/(\d{4})$/;
+
+// e.g. current "2026/2027", userLevel 300, targetLevel 200 -> "2025/2026"
+const sessionForLevel = (currentSession, userLevel, targetLevel) => {
+  const m = String(currentSession || '').match(SESSION_NAME_RE);
+  if (!m) return '';
+  const back = (Number(userLevel) - Number(targetLevel)) / 100;
+  if (!Number.isInteger(back) || back < 0) return '';
+  const start = Number(m[1]) - back;
+  return `${start}/${start + 1}`;
+};
+
 /* =========================================
    CUSTOM DROPDOWN COMPONENT
    ========================================= */
@@ -101,6 +113,7 @@ const ManageCourses = () => {
     limit: 100 
   });
   const allCourses = coursesData?.courses || [];
+  const currentSession = coursesData?.currentSession || null;
 
   const [createCourse, { isLoading: isCreating }] = useCreateCourseMutation();
   const [deleteCourse] = useDeleteCourseMutation();
@@ -111,12 +124,12 @@ const ManageCourses = () => {
   const [search, setSearch] = useState('');
   
   const [formData, setFormData] = useState({ 
-    code: '', title: '', units: '', semester: 'first', session: '2024/2025' 
+    code: '', title: '', units: '', semester: 'first', session: '' 
   });
 
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
   const [uploadFile, setUploadFile] = useState(null);
-  const [session, setSession] = useState('2024/2025');
+  const [session, setSession] = useState('');
   const [semester, setSemester] = useState('first');
   const [targetLevel, setTargetLevel] = useState(user?.level || 200); 
   const [parsedCourses, setParsedCourses] = useState([]);
@@ -137,6 +150,20 @@ const ManageCourses = () => {
     }
   }, [user?.level]);
 
+  // Auto-fill the single-course form session for the active level tab
+  useEffect(() => {
+    if (!user?.level || !currentSession) return;
+    const expected = sessionForLevel(currentSession, user.level, activeTab);
+    if (expected) setFormData((prev) => ({ ...prev, session: expected }));
+  }, [activeTab, currentSession, user?.level]);
+
+  // Auto-fill the upload modal session for the target level
+  useEffect(() => {
+    if (!user?.level || !currentSession) return;
+    const expected = sessionForLevel(currentSession, user.level, Number(targetLevel));
+    if (expected) setSession(expected);
+  }, [targetLevel, currentSession, user?.level]);
+
   if (isUserLoading) {
     return (
       <div className="mx-auto max-w-5xl space-y-4 p-4">
@@ -147,8 +174,17 @@ const ManageCourses = () => {
     );
   }
 
+  // Non-admins only see their own set's session for each level (sessionless courses always show)
+  const isScoped = user?.role !== 'admin' && !!user?.level && !!currentSession;
+  const sessionVisible = (c) => {
+    if (!isScoped || !c.session) return true;
+    const expected = sessionForLevel(currentSession, user.level, c.level);
+    return !expected || c.session === expected;
+  };
+
   const activeCourses = allCourses
     .filter(c => c.level === activeTab)
+    .filter(sessionVisible)
     .filter(c => 
       c.code.toLowerCase().includes(search.toLowerCase()) || 
       c.title.toLowerCase().includes(search.toLowerCase())
