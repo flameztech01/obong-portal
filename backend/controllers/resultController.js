@@ -115,6 +115,40 @@ const findOrCreateSession = async (name) => {
   }
 };
 
+/* ---------- session-per-level helpers ---------- */
+
+// Returns the name of the current academic session (e.g. "2025/2026") or null
+const getCurrentSessionName = async () => {
+  const current = await AcademicSession.findOne({ isCurrent: true }).lean();
+  if (current?.name && SESSION_NAME_RE.test(String(current.name).trim())) {
+    return String(current.name).trim();
+  }
+
+  try {
+    const settings = await Settings.findOne().lean();
+    const fromSettings = settings?.currentSession;
+    if (typeof fromSettings === "string" && SESSION_NAME_RE.test(fromSettings.trim())) {
+      return fromSettings.trim();
+    }
+  } catch (err) {
+    console.error("getCurrentSessionName settings lookup failed:", err.message);
+  }
+
+  return null;
+};
+
+// Given the current session, the student's current level and a target level,
+// returns the session name the student was in at that target level.
+// e.g. current "2025/2026", currentLevel 300, targetLevel 200 -> "2024/2025"
+const sessionNameForLevel = (currentSessionName, currentLevel, targetLevel) => {
+  const m = String(currentSessionName || "").match(SESSION_NAME_RE);
+  if (!m) return null;
+  const levelsBack = (Number(currentLevel) - Number(targetLevel)) / 100;
+  if (!Number.isInteger(levelsBack) || levelsBack < 0) return null;
+  const startYear = Number(m[1]) - levelsBack;
+  return `${startYear}/${startYear + 1}`;
+};
+
 /* ---------- permission helpers ---------- */
 
 const userCanManageOffering = async (user, offering) => {
@@ -230,7 +264,7 @@ const computeCarryovers = (allResults) => {
 };
 
 /* ============================================================
-   HISTORICAL COURSES (SMART FILTERING)
+   HISTORICAL COURSES (SESSION-AWARE FILTERING)
    ============================================================ */
 
 export const getHistoricalCourses = async (req, res) => {
@@ -239,7 +273,7 @@ export const getHistoricalCourses = async (req, res) => {
       return res.status(403).json({ message: "Only students can use this" });
     }
 
-    const currentLevel = req.user.level;
+    const currentLevel = Number(req.user.level);
     const validLevels = [100, 200, 300, 400, 500].filter((l) => l <= currentLevel);
 
     const allCourses = await Course.find({
@@ -249,6 +283,15 @@ export const getHistoricalCourses = async (req, res) => {
     }).lean();
 
     const myResults = await Result.find({ student: req.user.id, isPublished: true }).lean();
+
+    // Work out which session this student was in at each level
+    const currentSessionName = await getCurrentSessionName();
+    const expectedSessionByLevel = {};
+    if (currentSessionName) {
+      validLevels.forEach((lvl) => {
+        expectedSessionByLevel[lvl] = sessionNameForLevel(currentSessionName, currentLevel, lvl);
+      });
+    }
 
     // Identify carryovers (best grade is F)
     const bestGrades = new Map();
@@ -267,13 +310,21 @@ export const getHistoricalCourses = async (req, res) => {
     const grouped = { 100: {}, 200: {}, 300: {}, 400: {}, 500: {} };
 
     allCourses.forEach((c) => {
+      // Session filter: only show courses posted for this student's own set.
+      // Courses with no session set are still shown (backwards compatible).
+      const courseSession = c.session ? String(c.session).trim() : "";
+      const expectedSession = expectedSessionByLevel[c.level];
+      if (courseSession && expectedSession && courseSession !== expectedSession) {
+        return;
+      }
+
       const isCurrentLevel = c.level === currentLevel;
       const isCarryover = failedCourseCodes.has(c.code);
       const alreadyHaveResult = bestGrades.has(c.code);
 
       // Show if it's the current level, a carryover, or no published result exists for it yet
       if (isCurrentLevel || isCarryover || !alreadyHaveResult) {
-        const sessionName = c.session || "Unspecified Session";
+        const sessionName = courseSession || "Unspecified Session";
         if (!grouped[c.level]) grouped[c.level] = {};
         if (!grouped[c.level][sessionName]) grouped[c.level][sessionName] = [];
 
