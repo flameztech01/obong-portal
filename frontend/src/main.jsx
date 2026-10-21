@@ -20,6 +20,7 @@ import UploadResult from './pages/UploadResults.jsx';
 import ManageCourses from './pages/ManageCourses.jsx';
 import Quizzes from './pages/Quizzes.jsx';
 import Study from "./pages/Study.jsx";
+import ManageMaterials from './pages/ManageMaterials.jsx';
 
 // Admin Layout & Pages
 import AdminLogin from './pages/admin/Login.jsx';
@@ -64,6 +65,7 @@ const router = createBrowserRouter([
           { path: "manage-courses", element: <ManageCourses /> },
           { path: "quizzes", element: <Quizzes /> },
           {path: "study", element: <Study />},
+          {path: "manage-materials", element: <ManageMaterials />},
         ]
       },
 

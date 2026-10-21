@@ -36,7 +36,7 @@ cloudinary.config({
 // Multer memory storage
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB for materials
+  limits: { fileSize: 25 * 1024 * 1024 }, // 25MB per file
 });
 
 // Everything below requires login
@@ -45,7 +45,7 @@ router.use(protect);
 /* ---------- materials ---------- */
 router.post(
   "/materials",
-  upload.fields([{ name: "document", maxCount: 1 }]),
+  upload.fields([{ name: "document", maxCount: 10 }]),
   uploadMaterial
 );
 router.get   ("/materials",      listMaterials);

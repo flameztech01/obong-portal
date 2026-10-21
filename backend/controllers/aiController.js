@@ -350,7 +350,7 @@ export const parseResult = async (req, res) => {
 
 // @desc    AI-parse a course allocation PDF/image into a course list
 // @route   POST /api/ai/parse/courses
-// @access  Admin / HOD
+// @access  Admin / HOD / Student Admin
 export const parseCourseDocument = async (req, res) => {
   let uploaded = null;
   let resourceType = "image";
@@ -358,8 +358,16 @@ export const parseCourseDocument = async (req, res) => {
   try {
     const isAdmin = req.user.role === "admin";
     const isHod = req.user.extraRoles?.includes("hod");
-    if (!isAdmin && !isHod) {
-      return res.status(403).json({ message: "Not allowed" });
+    const isStudentAdmin = req.user.extraRoles?.includes("student_admin");
+
+    // Student admins are allowed to parse course documents for their scoped
+    // levels/departments. Actual persistence happens via the courses bulk-create
+    // endpoint, which enforces the scope again.
+    if (!isAdmin && !isHod && !isStudentAdmin) {
+      return res.status(403).json({
+        message:
+          "Only admins, HODs, and student admins can parse course documents",
+      });
     }
 
     const file =
@@ -394,6 +402,7 @@ export const parseCourseDocument = async (req, res) => {
 
       await logAudit(req, "ai_parse", "course_allocation", null, {
         courses: courses.length,
+        actedAs: isAdmin ? "admin" : isHod ? "hod" : "student_admin",
       });
 
       return res.json({

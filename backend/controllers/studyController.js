@@ -3,9 +3,11 @@ import { v2 as cloudinary } from "cloudinary";
 import Material from "../models/materialModel.js";
 import Quiz from "../models/quizModel.js";
 import QuizAttempt from "../models/quizAttemptModel.js";
+import Course from "../models/courseModel.js";
 import CourseOffering from "../models/courseOfferingModel.js";
 import Enrollment from "../models/enrollmentModel.js";
 import CourseRep from "../models/courseRepModel.js";
+import AcademicSession from "../models/academicSessionModel.js";
 import User from "../models/userModel.js";
 import Settings from "../models/settingsModel.js";
 import AuditLog from "../models/auditLogModel.js";
@@ -14,25 +16,96 @@ import AuditLog from "../models/auditLogModel.js";
    HELPERS
    ============================================================ */
 
-const uploadFileToCloudinary = (file, folder, options = {}) =>
+const ALL_LEVELS = [100, 200, 300, 400, 500];
+const SESSION_NAME_RE = /^(\d{4})\/(\d{4})$/;
+
+const ALLOWED_EXTENSIONS = [
+  "pdf", "doc", "docx", "ppt", "pptx", "xls", "xlsx", "txt", "rtf",
+  "png", "jpg", "jpeg", "webp",
+];
+
+const ALLOWED_MIME_PREFIXES = [
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument",
+  "application/vnd.ms-powerpoint",
+  "application/vnd.ms-excel",
+  "application/rtf",
+  "text/plain",
+  "image/",
+];
+
+const idOf = (v) => String(v?._id || v || "");
+
+const getExt = (name = "") => {
+  const i = String(name).lastIndexOf(".");
+  return i === -1 ? "" : String(name).slice(i + 1).toLowerCase();
+};
+
+const isAllowedFile = (file) => {
+  const mime = String(file.mimetype || "").toLowerCase();
+  const ext = getExt(file.originalname);
+  return (
+    ALLOWED_MIME_PREFIXES.some((p) => mime.startsWith(p)) ||
+    ALLOWED_EXTENSIONS.includes(ext)
+  );
+};
+
+const resourceTypeFor = (mime = "", name = "") => {
+  const m = String(mime).toLowerCase();
+  if (m.startsWith("image/")) return "image";
+  if (m.startsWith("video/")) return "video";
+  return "raw";
+};
+
+const safeFileName = (name = "file") =>
+  String(name)
+    .replace(/[^a-zA-Z0-9._-]+/g, "_")
+    .replace(/_+/g, "_")
+    .slice(-80);
+
+const uploadFileToCloudinary = (file, folder) =>
   new Promise((resolve, reject) => {
     if (!file) return resolve(null);
+    const resourceType = resourceTypeFor(file.mimetype, file.originalname);
+    const options = { folder, resource_type: resourceType };
+
+    // Raw files (pdf, word, ppt...) keep their extension in the public id
+    // so the delivered URL ends with .pdf / .docx and downloads correctly.
+    if (resourceType === "raw") {
+      options.public_id = `${Date.now()}_${safeFileName(file.originalname)}`;
+    }
+
     cloudinary.uploader
-      .upload_stream(
-        { folder, resource_type: "auto", ...options },
-        (error, result) => (error ? reject(error) : resolve(result))
+      .upload_stream(options, (error, result) =>
+        error ? reject(error) : resolve(result)
       )
       .end(file.buffer);
   });
 
-const deleteFromCloudinary = async (publicId) => {
+const deleteFromCloudinary = async (publicId, mime = "", name = "") => {
   if (!publicId) return null;
-  try {
-    return await cloudinary.uploader.destroy(publicId, { resource_type: "auto" });
-  } catch (err) {
-    console.error("Cloudinary delete failed:", err.message);
-    return null;
+  const primary = resourceTypeFor(mime, name);
+  const order = [primary, ...["raw", "image", "video"].filter((t) => t !== primary)];
+  for (const type of order) {
+    try {
+      const out = await cloudinary.uploader.destroy(publicId, { resource_type: type });
+      if (out?.result === "ok") return out;
+    } catch (err) {
+      console.error("Cloudinary delete failed:", err.message);
+    }
   }
+  return null;
+};
+
+// multer can give req.files as an array (upload.array) or an object (upload.fields)
+const collectFiles = (req) => {
+  if (req.files && !Array.isArray(req.files) && typeof req.files === "object") {
+    if (Array.isArray(req.files.document)) return req.files.document;
+    return Object.values(req.files).flat();
+  }
+  if (Array.isArray(req.files)) return req.files;
+  return req.file ? [req.file] : [];
 };
 
 const paginate = (query) => {
@@ -64,6 +137,49 @@ const getSettingsDoc = async () => {
   return s;
 };
 
+/* ---------- session-per-level helpers ---------- */
+
+const getCurrentSessionName = async () => {
+  const current = await AcademicSession.findOne({ isCurrent: true }).lean();
+  const name = current?.name ? String(current.name).trim() : "";
+  return SESSION_NAME_RE.test(name) ? name : null;
+};
+
+// e.g. current "2026/2027", userLevel 300, targetLevel 200 -> "2025/2026"
+const sessionNameForLevel = (currentSessionName, userLevel, targetLevel) => {
+  const m = String(currentSessionName || "").match(SESSION_NAME_RE);
+  if (!m) return null;
+  const back = (Number(userLevel) - Number(targetLevel)) / 100;
+  if (!Number.isInteger(back) || back < 0) return null;
+  const start = Number(m[1]) - back;
+  return `${start}/${start + 1}`;
+};
+
+const findOrCreateSessionByName = async (name) => {
+  const clean = String(name || "").trim();
+  let sess = await AcademicSession.findOne({ name: clean });
+  if (sess) return { sess };
+
+  const m = clean.match(SESSION_NAME_RE);
+  if (!m || Number(m[2]) !== Number(m[1]) + 1) {
+    return { error: `Invalid session "${clean}" (expected e.g. 2024/2025)` };
+  }
+
+  try {
+    sess = await AcademicSession.create({
+      name: clean,
+      startDate: new Date(Date.UTC(Number(m[1]), 8, 1)),
+      endDate: new Date(Date.UTC(Number(m[2]), 7, 31)),
+      isCurrent: false,
+    });
+    return { sess };
+  } catch (err) {
+    const again = await AcademicSession.findOne({ name: clean });
+    if (again) return { sess: again };
+    return { error: `Could not create session "${clean}": ${err.message}` };
+  }
+};
+
 /* ---------- permission helpers ---------- */
 
 const isEnrolledIn = async (userId, offeringId) => {
@@ -92,7 +208,7 @@ const userCanManageOffering = async (user, offering) => {
   return false;
 };
 
-// student OR course_rep of this offering OR lecturer/HOD/admin
+// student OR course_rep of this offering OR lecturer/HOD/admin (used by quizzes)
 const userCanViewOfferingContent = async (user, offering) => {
   if (await userCanManageOffering(user, offering)) return true;
   if (user.role === "student" && (await isEnrolledIn(user.id, offering._id))) {
@@ -101,12 +217,178 @@ const userCanViewOfferingContent = async (user, offering) => {
   return false;
 };
 
+// Student admin / team member whose scope covers this department + level
+const isScopedStudentAdmin = (user, departmentId, level) => {
+  if (!user.extraRoles?.some((r) => ["student_admin", "team_member"].includes(r))) {
+    return false;
+  }
+  const levels = (user.scope?.levels || []).map(Number);
+  const depts = (user.scope?.departments || []).map(String);
+  return levels.includes(Number(level)) && depts.includes(String(departmentId));
+};
+
+// Is this offering in the session that the user's own set had at that level?
+const sessionMatchesUsersSet = (user, offering, currentSessionName) => {
+  if (!currentSessionName) return true;
+  const expected = sessionNameForLevel(currentSessionName, user.level, offering.level);
+  const name = offering.session?.name;
+  return !expected || !name || name === expected;
+};
+
+// Student admin may upload for their own set, any level up to their current level
+const userCanUploadAsStudentAdmin = (user, offering, currentSessionName) => {
+  if (!isScopedStudentAdmin(user, offering.department, offering.level)) return false;
+  if (Number(offering.level) > Number(user.level)) return false;
+  return sessionMatchesUsersSet(user, offering, currentSessionName);
+};
+
+// Students can read materials of their own set (all levels up to theirs)
+const studentCanSeeSetOffering = (user, offering, currentSessionName) => {
+  if (user.role !== "student") return false;
+  if (idOf(offering.department) !== idOf(user.department)) return false;
+  if (Number(offering.level) > Number(user.level)) return false;
+  return sessionMatchesUsersSet(user, offering, currentSessionName);
+};
+
+const getStudentVisibleOfferingIds = async (user) => {
+  const ids = new Set(
+    (await Enrollment.find({ student: user.id }).distinct("offering")).map(String)
+  );
+
+  const userLevel = Number(user.level);
+  const departmentId = idOf(user.department);
+
+  if (departmentId && ALL_LEVELS.includes(userLevel)) {
+    const levels = ALL_LEVELS.filter((l) => l <= userLevel);
+    const currentSessionName = await getCurrentSessionName();
+
+    let query = null;
+    if (!currentSessionName) {
+      query = { department: departmentId, level: { $in: levels } };
+    } else {
+      const names = levels
+        .map((l) => sessionNameForLevel(currentSessionName, userLevel, l))
+        .filter(Boolean);
+      const sessions = await AcademicSession.find({ name: { $in: names } })
+        .select("name")
+        .lean();
+      const idByName = new Map(sessions.map((s) => [s.name, s._id]));
+
+      const clauses = levels
+        .map((l) => ({
+          level: l,
+          session: idByName.get(sessionNameForLevel(currentSessionName, userLevel, l)),
+        }))
+        .filter((c) => c.session);
+
+      if (clauses.length) query = { department: departmentId, $or: clauses };
+    }
+
+    if (query) {
+      const setOfferingIds = await CourseOffering.find(query).distinct("_id");
+      setOfferingIds.forEach((id) => ids.add(String(id)));
+    }
+  }
+
+  return [...ids];
+};
+
+// Find or create the offering a student admin / HOD / admin upload belongs to
+const resolveOfferingFromCourse = async (user, courseId, semesterInput) => {
+  const course = await Course.findById(courseId);
+  if (!course) return { status: 404, error: "Course not found" };
+
+  const currentSessionName = await getCurrentSessionName();
+  const isAdmin = user.role === "admin";
+  const isHod =
+    user.extraRoles?.includes("hod") &&
+    (user.scope?.departments || []).map(String).includes(String(course.department));
+
+  if (!isAdmin && !isHod) {
+    if (!isScopedStudentAdmin(user, course.department, course.level)) {
+      return {
+        status: 403,
+        error: "You don't have scope to upload materials for this department/level",
+      };
+    }
+    if (Number(course.level) > Number(user.level)) {
+      return { status: 403, error: "You can't upload for a level above yours" };
+    }
+    if (currentSessionName && course.session) {
+      const expected = sessionNameForLevel(currentSessionName, user.level, course.level);
+      if (expected && course.session !== expected) {
+        return {
+          status: 403,
+          error: "This course belongs to a different set's session",
+        };
+      }
+    }
+  }
+
+  const sessionName =
+    (course.session && String(course.session).trim()) ||
+    (currentSessionName && !isAdmin && !isHod
+      ? sessionNameForLevel(currentSessionName, user.level, course.level)
+      : null) ||
+    currentSessionName;
+
+  if (!sessionName) {
+    return { status: 400, error: "This course has no session. Set a session first." };
+  }
+
+  const { sess, error } = await findOrCreateSessionByName(sessionName);
+  if (!sess) return { status: 400, error };
+
+  const semester = ["first", "second"].includes(semesterInput)
+    ? semesterInput
+    : ["first", "second"].includes(course.semester)
+    ? course.semester
+    : "first";
+
+  let offering = await CourseOffering.findOne({
+    course: course._id,
+    session: sess._id,
+    semester,
+  });
+
+  if (!offering) {
+    try {
+      offering = await CourseOffering.create({
+        course: course._id,
+        session: sess._id,
+        semester,
+        department: course.department,
+        level: course.level,
+        lecturer: null,
+        createdBy: user.id,
+      });
+    } catch (err) {
+      offering = await CourseOffering.findOne({
+        course: course._id,
+        session: sess._id,
+        semester,
+      });
+      if (!offering) {
+        console.error("resolveOfferingFromCourse create failed:", err.message);
+        return { status: 500, error: "Could not prepare course offering" };
+      }
+    }
+  }
+
+  const populated = await CourseOffering.findById(offering._id)
+    .populate("course", "code title")
+    .populate("session", "name");
+
+  return { offering: populated };
+};
+
 /* ---------- sanitizers ---------- */
 
 const sanitizeMaterial = (m) => ({
   id: m._id,
   offering: m.offering,
   course: m.course || null,
+  level: m.level ?? null,
   title: m.title,
   description: m.description || "",
   type: m.type,
@@ -178,75 +460,125 @@ const sanitizeAttempt = (a, { includeAnswers = true } = {}) => ({
    MATERIALS
    ============================================================ */
 
-// @desc    Upload a study material
+// @desc    Upload a study material (pdf, word, ppt, excel, txt, images)
+//          Send EITHER offeringId (lecturer / HOD / admin / course rep)
+//          OR courseId (+ optional semester) for student admins / HOD / admin.
 // @route   POST /api/study/materials
-// @access  Lecturer / HOD / Admin / course_rep of that offering
+// @access  Assigned lecturer / HOD / Admin / course_rep / scoped student admin
 export const uploadMaterial = async (req, res) => {
   try {
-    const { offeringId, title, description, type } = req.body;
+    const { offeringId, courseId, title, description, type, semester } = req.body;
 
-    if (!offeringId || !title) {
-      return res.status(400).json({ message: "offeringId and title are required" });
-    }
-
-    const file = req.files?.document?.[0];
-    if (!file) {
-      return res.status(400).json({ message: "No document provided" });
-    }
-
-    const offering = await CourseOffering.findById(offeringId).populate(
-      "course",
-      "code title"
-    );
-    if (!offering) return res.status(404).json({ message: "Offering not found" });
-
-    // Only assigned lecturer / HOD / admin can upload.
-    // Course rep can also upload if settings.allowCourseRepMaterialUpload is true.
-    const settings = await getSettingsDoc();
-    const isManager = await userCanManageOffering(req.user, offering);
-    const isRep = req.user.extraRoles?.includes("course_rep")
-      ? await CourseRep.exists({
-          user: req.user.id,
-          offering: offering._id,
-          isActive: true,
-        })
-      : false;
-
-    if (!isManager && !(isRep && settings.allowCourseRepMaterialUpload)) {
-      return res.status(403).json({
-        message:
-          "Only the assigned lecturer, HOD, admin, or an approved course rep can upload materials",
+    if ((!offeringId && !courseId) || !title) {
+      return res.status(400).json({
+        message: "title and either offeringId or courseId are required",
       });
     }
 
-    const uploaded = await uploadFileToCloudinary(file, "school_portal/materials");
+    const files = collectFiles(req);
+    if (!files.length) {
+      return res.status(400).json({ message: "No document provided" });
+    }
+
+    const badFile = files.find((f) => !isAllowedFile(f));
+    if (badFile) {
+      return res.status(400).json({
+        message: `"${badFile.originalname}" is not allowed. Use PDF, Word, PowerPoint, Excel, text or image files.`,
+      });
+    }
+
+    let offering;
+    let permitted = false;
+
+    if (offeringId) {
+      offering = await CourseOffering.findById(offeringId)
+        .populate("course", "code title")
+        .populate("session", "name");
+      if (!offering) return res.status(404).json({ message: "Offering not found" });
+
+      const settings = await getSettingsDoc();
+      const isManager = await userCanManageOffering(req.user, offering);
+      const isRep = req.user.extraRoles?.includes("course_rep")
+        ? await CourseRep.exists({
+            user: req.user.id,
+            offering: offering._id,
+            isActive: true,
+          })
+        : false;
+
+      const currentSessionName = await getCurrentSessionName();
+      const isStudentAdmin = userCanUploadAsStudentAdmin(
+        req.user,
+        offering,
+        currentSessionName
+      );
+
+      permitted =
+        isManager || (isRep && settings.allowCourseRepMaterialUpload) || isStudentAdmin;
+    } else {
+      const resolved = await resolveOfferingFromCourse(req.user, courseId, semester);
+      if (resolved.error) {
+        return res.status(resolved.status).json({ message: resolved.error });
+      }
+      offering = resolved.offering;
+      permitted = true;
+    }
+
+    if (!permitted) {
+      return res.status(403).json({
+        message:
+          "Only the assigned lecturer, HOD, admin, an approved course rep, or a student admin in scope can upload materials",
+      });
+    }
 
     const validTypes = ["lecture_note", "slide", "past_question", "textbook", "other"];
     const materialType = validTypes.includes(type) ? type : "lecture_note";
 
-    const material = await Material.create({
-      offering: offering._id,
-      course: offering.course._id,
-      department: offering.department,
-      level: offering.level,
-      title: title.trim(),
-      description: description?.trim() || "",
-      type: materialType,
-      fileUrl: uploaded.secure_url,
-      filePublicId: uploaded.public_id,
-      mimeType: file.mimetype,
-      sizeBytes: file.size,
-      originalName: file.originalname,
-      uploadedBy: req.user.id,
-    });
+    const created = [];
+    for (const file of files) {
+      let uploaded;
+      try {
+        uploaded = await uploadFileToCloudinary(file, "school_portal/materials");
+      } catch (err) {
+        console.error("Cloudinary upload failed:", err.message);
+        return res.status(500).json({
+          message: `Upload failed for "${file.originalname}": ${err.message || "Cloudinary error"}`,
+          uploaded: created.map(sanitizeMaterial),
+        });
+      }
 
-    await logAudit(req, "upload", "material", material._id, {
+      const baseName = String(file.originalname || "").replace(/\.[^.]+$/, "");
+      const materialTitle =
+        files.length > 1 ? `${title.trim()} - ${baseName}` : title.trim();
+
+      const material = await Material.create({
+        offering: offering._id,
+        course: offering.course._id,
+        department: offering.department,
+        level: offering.level,
+        title: materialTitle,
+        description: description?.trim() || "",
+        type: materialType,
+        fileUrl: uploaded.secure_url,
+        filePublicId: uploaded.public_id,
+        mimeType: file.mimetype,
+        sizeBytes: file.size,
+        originalName: file.originalname,
+        uploadedBy: req.user.id,
+      });
+
+      created.push(material);
+    }
+
+    await logAudit(req, "upload", "material", created[0]._id, {
       offering: offering._id,
+      count: created.length,
     });
 
     return res.status(201).json({
-      message: "Material uploaded",
-      material: sanitizeMaterial(material),
+      message: created.length > 1 ? `${created.length} materials uploaded` : "Material uploaded",
+      material: sanitizeMaterial(created[0]),
+      materials: created.map(sanitizeMaterial),
     });
   } catch (err) {
     console.error("uploadMaterial error:", err);
@@ -254,7 +586,9 @@ export const uploadMaterial = async (req, res) => {
   }
 };
 
-// @desc    List materials (student: only for enrolled offerings)
+// @desc    List materials
+//          Students (incl. student admins): their own set's materials for every
+//          level up to their current one, plus anything they're enrolled in.
 // @route   GET /api/study/materials
 // @access  Auth
 export const listMaterials = async (req, res) => {
@@ -273,17 +607,19 @@ export const listMaterials = async (req, res) => {
       ];
     }
 
-    // Students see only materials for offerings they're enrolled in
     if (req.user.role === "student") {
-      const enrolledOfferingIds = await Enrollment.find({
-        student: req.user.id,
-      }).distinct("offering");
-      filter.offering = { $in: enrolledOfferingIds };
+      let visibleIds = await getStudentVisibleOfferingIds(req.user);
+      if (offering) visibleIds = visibleIds.filter((id) => id === String(offering));
+      filter.offering = { $in: visibleIds };
     }
 
     const [materials, total] = await Promise.all([
       Material.find(filter)
-        .populate("offering", "level semester")
+        .populate({
+          path: "offering",
+          select: "level semester session",
+          populate: { path: "session", select: "name" },
+        })
         .populate("course", "code title units")
         .populate("uploadedBy", "name")
         .sort({ createdAt: -1 })
@@ -306,7 +642,7 @@ export const listMaterials = async (req, res) => {
 
 // @desc    Get material detail
 // @route   GET /api/study/materials/:id
-// @access  Auth (enrolled student or staff)
+// @access  Auth (own set's student, enrolled student, or staff)
 export const getMaterial = async (req, res) => {
   try {
     const material = await Material.findById(req.params.id)
@@ -314,12 +650,22 @@ export const getMaterial = async (req, res) => {
       .populate("uploadedBy", "name");
     if (!material) return res.status(404).json({ message: "Material not found" });
 
-    const offering = await CourseOffering.findById(material.offering);
+    const offering = await CourseOffering.findById(material.offering).populate(
+      "session",
+      "name"
+    );
     if (!offering) return res.status(404).json({ message: "Offering not found" });
 
-    if (!(await userCanViewOfferingContent(req.user, offering))) {
-      return res.status(403).json({ message: "Not allowed" });
+    const isUploader = idOf(material.uploadedBy) === String(req.user.id);
+    let allowed =
+      isUploader || (await userCanViewOfferingContent(req.user, offering));
+
+    if (!allowed && req.user.role === "student") {
+      const currentSessionName = await getCurrentSessionName();
+      allowed = studentCanSeeSetOffering(req.user, offering, currentSessionName);
     }
+
+    if (!allowed) return res.status(403).json({ message: "Not allowed" });
 
     return res.json({ material: sanitizeMaterial(material) });
   } catch (err) {
@@ -344,7 +690,13 @@ export const deleteMaterial = async (req, res) => {
       return res.status(403).json({ message: "Not allowed" });
     }
 
-    if (material.filePublicId) await deleteFromCloudinary(material.filePublicId);
+    if (material.filePublicId) {
+      await deleteFromCloudinary(
+        material.filePublicId,
+        material.mimeType,
+        material.originalName
+      );
+    }
     await Material.deleteOne({ _id: material._id });
 
     await logAudit(req, "delete", "material", material._id);
