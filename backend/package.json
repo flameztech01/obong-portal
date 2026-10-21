@@ -12,6 +12,7 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@napi-rs/canvas": "^1.0.12",
     "body-parser": "^2.3.0",
     "cloudinary": "^2.11.0",
     "cookie-parser": "^1.4.7",
@@ -25,6 +26,7 @@
     "mongoose": "^9.11.2",
     "multer": "^2.4.0",
     "pdf-parse": "^2.4.5",
-    "resend": "^6.34.1"
+    "resend": "^6.34.1",
+    "sharp": "^0.35.5"
   }
 }

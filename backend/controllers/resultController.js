@@ -245,7 +245,7 @@ export const getHistoricalCourses = async (req, res) => {
     const allCourses = await Course.find({
       department: req.user.department,
       level: { $in: validLevels },
-      isActive: true,
+      isActive: { $ne: false },
     }).lean();
 
     const myResults = await Result.find({ student: req.user.id, isPublished: true }).lean();
@@ -269,10 +269,10 @@ export const getHistoricalCourses = async (req, res) => {
     allCourses.forEach((c) => {
       const isCurrentLevel = c.level === currentLevel;
       const isCarryover = failedCourseCodes.has(c.code);
-      const isBuildingHistory = !req.user.hasUploadedHistoricalResults;
+      const alreadyHaveResult = bestGrades.has(c.code);
 
-      // Only show if it's their current level, a carryover, or they haven't uploaded history yet
-      if (isCurrentLevel || isCarryover || isBuildingHistory) {
+      // Show if it's the current level, a carryover, or no published result exists for it yet
+      if (isCurrentLevel || isCarryover || !alreadyHaveResult) {
         const sessionName = c.session || "Unspecified Session";
         if (!grouped[c.level]) grouped[c.level] = {};
         if (!grouped[c.level][sessionName]) grouped[c.level][sessionName] = [];

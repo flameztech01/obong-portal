@@ -2,6 +2,14 @@
 import Groq from "groq-sdk";
 import { PDFParse } from "pdf-parse";
 
+// Optional: image pre-processing (auto-rotate, resize, sharpen). `npm i sharp`
+let sharp = null;
+try {
+  sharp = (await import("sharp")).default;
+} catch {
+  /* sharp not installed: images are sent as-is */
+}
+
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 const splitEnv = (v) =>
@@ -463,6 +471,183 @@ const mostCommon = (arr) => {
 };
 
 /* ============================================================
+   TRANSCRIPT PAGE LOADING (images + PDFs → one image per page)
+   ============================================================ */
+
+const fetchBuffer = async (url) => {
+  const res = await fetch(url);
+  if (!res.ok) {
+    if (res.status === 401 || res.status === 403) {
+      throw new Error(
+        `Could not download file (HTTP ${res.status}). For PDFs enable "Allow delivery of PDF and ZIP files" in Cloudinary Settings > Security.`
+      );
+    }
+    throw new Error(`Failed to fetch file (HTTP ${res.status})`);
+  }
+  return Buffer.from(await res.arrayBuffer());
+};
+
+// Auto-rotate (EXIF), cap resolution, boost contrast/sharpness, return a base64 data URI.
+const prepareImageDataUri = async (buffer, fallbackMime = "image/jpeg") => {
+  if (!sharp) return `data:${fallbackMime};base64,${buffer.toString("base64")}`;
+  try {
+    const out = await sharp(buffer)
+      .rotate()
+      .resize({ width: 2400, height: 2400, fit: "inside", withoutEnlargement: true })
+      .normalize()
+      .sharpen()
+      .jpeg({ quality: 88 })
+      .toBuffer();
+    return `data:image/jpeg;base64,${out.toString("base64")}`;
+  } catch (err) {
+    console.warn("[image] preprocessing failed, sending original:", err.message);
+    return `data:${fallbackMime};base64,${buffer.toString("base64")}`;
+  }
+};
+
+// Render PDF pages to images (needs @napi-rs/canvas for pdf-parse v2 screenshots)
+const pdfBufferToImageUris = async (buffer, { maxPages = 8, scale = 2 } = {}) => {
+  const parser = new PDFParse({ data: new Uint8Array(buffer) });
+  try {
+    const shots = await parser.getScreenshot({ scale, first: maxPages });
+    const uris = [];
+    for (const p of shots?.pages || []) {
+      uris.push(await prepareImageDataUri(Buffer.from(p.data), "image/png"));
+    }
+    return uris;
+  } finally {
+    await parser.destroy();
+  }
+};
+
+// → [{ imageUri } | { text }]  (one entry per page / image)
+const loadPageSources = async (fileList) => {
+  const pages = [];
+  for (const f of fileList) {
+    const url = f?.url || f?.secure_url || f?.fileUrl;
+    const mime = String(f?.mimeType || f?.mimetype || "").toLowerCase();
+    if (!url) continue;
+
+    const isPdf = mime === "application/pdf" || /\.pdf($|\?)/i.test(url);
+    const isImg = mime.startsWith("image/") || /\.(jpe?g|jfif|png|webp)($|\?)/i.test(url);
+
+    if (isImg) {
+      pages.push({ imageUri: await prepareImageDataUri(await fetchBuffer(url)) });
+    } else if (isPdf) {
+      const buf = await fetchBuffer(url);
+      try {
+        const uris = await pdfBufferToImageUris(buf);
+        if (!uris.length) throw new Error("no pages rendered");
+        uris.forEach((u) => pages.push({ imageUri: u }));
+      } catch (e) {
+        console.warn("[pdf] render failed, falling back to text:", e.message);
+        const text = (await extractPdfText(buf)).trim();
+        if (text.length < 10) {
+          throw new Error(
+            "PDF has no readable text and could not be rendered to images. Upload clear photos instead."
+          );
+        }
+        pages.push({ text: text.slice(0, MAX_DOC_CHARS) });
+      }
+    } else {
+      throw new Error(`Unsupported file type: ${mime || "unknown"}`);
+    }
+  }
+  return pages;
+};
+
+/* ============================================================
+   TRANSCRIPT COMPLETENESS CHECKS + PER-PAGE PARSING
+   ============================================================ */
+
+const findParseProblems = ({ rows, totals }) => {
+  const problems = [];
+
+  // S/N continuity (e.g. IRSBACCOM numbers rows 1..N across both semesters)
+  const sns = rows.map((r) => Number(r?.sn)).filter((n) => Number.isInteger(n) && n > 0);
+  if (sns.length >= Math.max(3, rows.length * 0.7)) {
+    const have = new Set(sns);
+    const missing = [];
+    for (let n = 1; n <= Math.max(...sns); n++) if (!have.has(n)) missing.push(n);
+    if (missing.length) problems.push(`Rows with S/N ${missing.join(", ")} are missing.`);
+  }
+
+  // Printed semester credits vs parsed units
+  const sums = new Map();
+  for (const r of rows) {
+    const key = `${normalizeLevel(r?.level) || ""}|${normalizeSemester(r?.semester) || ""}`;
+    sums.set(key, (sums.get(key) || 0) + (Number(r?.units) || 0));
+  }
+  for (const t of totals) {
+    const sem = normalizeSemester(t?.semester);
+    const credits = Number(t?.credits);
+    if (!sem || !credits) continue;
+    const key = `${normalizeLevel(t?.level) || ""}|${sem}`;
+    if (sums.has(key) && sums.get(key) !== credits) {
+      problems.push(
+        `${sem} semester: printed credits are ${credits} but parsed rows add up to ${sums.get(key)}.`
+      );
+    }
+  }
+  return problems;
+};
+
+const parseOnePage = async (page, prompt, pageNo, total) => {
+  const run = async (extra = "") => {
+    const text = `${prompt}${extra}\n\n(This is page ${pageNo} of ${total}.)`;
+    const { kind, messages } = page.imageUri
+      ? {
+          kind: "vision",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text },
+                { type: "image_url", image_url: { url: page.imageUri } },
+              ],
+            },
+          ],
+        }
+      : {
+          kind: "text",
+          messages: [{ role: "user", content: `${text}\n\n--- DOCUMENT TEXT ---\n${page.text}` }],
+        };
+
+    const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 16384, temperature: 0 });
+    const parsed = safeJsonParse(raw);
+    return {
+      rows: Array.isArray(parsed?.rows) ? parsed.rows : [],
+      totals: Array.isArray(parsed?.printedTotals) ? parsed.printedTotals : [],
+    };
+  };
+
+  let best = await run();
+  let problems = findParseProblems(best);
+
+  if (problems.length) {
+    try {
+      const retry = await run(
+        `\n\nIMPORTANT: your previous answer was incomplete: ${problems.join(
+          " "
+        )} Re-read every table row by row, top to bottom (the last row directly above a totals line is a real course), and return the COMPLETE list again.`
+      );
+      const retryProblems = findParseProblems(retry);
+      if (
+        retry.rows.length > best.rows.length ||
+        (retry.rows.length === best.rows.length && retryProblems.length < problems.length)
+      ) {
+        best = retry;
+        problems = retryProblems;
+      }
+    } catch (e) {
+      console.warn(`[parse] retry failed on page ${pageNo}:`, e.message);
+    }
+  }
+
+  return { ...best, problems };
+};
+
+/* ============================================================
    PUBLIC METHODS
    ============================================================ */
 
@@ -508,6 +693,7 @@ Rules:
 
 // Accepts multiple files (pages): files = [{ url, mimeType }, ...]
 // Also still accepts legacy single { fileUrl, mimeType }.
+// Each page/image is parsed in its own request, then merged.
 export const parseResultDocument = async ({
   files,
   fileUrl,
@@ -530,78 +716,71 @@ export const parseResultDocument = async ({
 
   const context = isLecturer
     ? `This is a result sheet for ONE specific course: ${courseCode}. Every row is for the SAME course.`
-    : `This is a student transcript covering MULTIPLE courses, possibly across MULTIPLE pages/images (for example one page per level). Each page may contain a "SEMESTER ONE" table and a "SEMESTER TWO" table, often placed SIDE BY SIDE (left table = semester one, right table = semester two), or one below the other.`;
+    : `This is a student transcript covering MULTIPLE courses. Each page may contain a "SEMESTER ONE" table and a "SEMESTER TWO" table, often placed SIDE BY SIDE (left table = semester one, right table = semester two), or one below the other.`;
 
   const prompt = `You are an expert OCR AI parsing a university transcript. ${context}
 
-Extract every course row from the data tables of ALL provided pages. Return ONLY valid JSON:
+Extract every course row from the data tables on this page. Return ONLY valid JSON:
 
 {
   "rows": [
     {
+      "sn": number | null,
       "level": 100 | 200 | 300 | 400 | 500 | null,
       "session": "YYYY/YYYY" | null,
       "semester": "first" | "second" | null,
+      "matricNumber": "string | null",
       "courseCode": "string | null",
       "courseTitle": "string | null",
       "units": number | null,
       "score": number | null,
       "grade": "A" | "B" | "C" | "D" | "E" | "F" | null
     }
-  ]
+  ],
+  "printedTotals": [ { "level": number | null, "semester": "first" | "second" | null, "credits": number } ]
 }
 
 CRITICAL RULES:
-1. You MUST extract every single course row from ALL tables on ALL pages. Do not skip rows, and do not merge pages.
-2. Look for columns like "COURSE CODE", "COURSE TITLE", "COURSE UNIT" / "CREDIT UNIT" (or "UNIT"), "GRADE (100)" (or "SCORE"), and "LETTER GRADE" (or "GRADE"). Ignore S/N serial numbers and the "GP" / "CP" / "GRADE POINT" columns.
+1. You MUST extract every single course row from ALL tables on the page. Do not skip rows. The LAST row directly above a totals/summary line is still a real course row.
+2. Look for columns like "COURSE CODE", "COURSE TITLE", "COURSE UNIT" / "CREDIT UNIT" (or "UNIT"), "GRADE (100)" (or "SCORE"), and "LETTER GRADE" (or "GRADE"). Ignore the "GP" / "CP" / "GRADE POINT" columns.
 3. Map the numerical score (e.g. 78) to "score", the letter (e.g. A) to "grade", and the credit unit (e.g. 2) to "units". If only one of score/grade exists, leave the other null.
-4. ${isLecturer ? `Use "${courseCode}" and "${units}" for every row.` : `Extract the real code and units printed on the page.`}
-5. LEVEL: read the level heading of each page or section (e.g. "LEVEL 100", "EVEL 200" which is a typo for LEVEL 200, "100 LEVEL", "YEAR ONE" = 100, "YEAR TWO" = 200). Put it in every row's "level" as 100, 200, 300, 400 or 500. Rows from different pages with different levels MUST have different "level" values.
-6. SESSION: ONLY set "session" if an academic session such as "2023/2024" is actually PRINTED on that page or section, written as "YYYY/YYYY". If no session is printed, set "session" to null. NEVER guess or invent a session.
-7. SEMESTER: use the heading above each table. "1ST SEMESTER" / "FIRST SEMESTER" / "SEMESTER ONE" (even if prefixed by words like "PREPARATORY:") → "first". "2ND SEMESTER" / "SECOND SEMESTER" / "SEMESTER TWO" → "second". Every row in a table gets that table's semester.
-8. Ignore summary lines (semester credits, grade points, GPA, CGPA), the year/CGPA summary table and the grading-scale legend. They are NOT course rows.
-9. Return ONLY the JSON object. No markdown, no comments.`;
+4. ${
+    isLecturer
+      ? `Use "${courseCode}" and "${units}" for every row. Read each student's matric/registration number into "matricNumber".`
+      : `Extract the real code and units printed on the page. "matricNumber" must be null.`
+  }
+5. LEVEL: read the level heading of the page or section (e.g. "LEVEL 100", "EVEL 200" which is a typo for LEVEL 200, "100 LEVEL", "YEAR ONE" = 100, "YEAR TWO" = 200). Put it in every row's "level" as 100, 200, 300, 400 or 500. If no level is printed, use null.
+6. SESSION: ONLY set "session" if an academic session such as "2023/2024" is actually PRINTED on the page, written as "YYYY/YYYY". A session printed once near the top applies to every table below it on that page. If no session is printed, set "session" to null. NEVER guess or invent a session.
+7. SEMESTER: use the heading above each table. "1ST SEMESTER" / "FIRST SEMESTER" / "SEMESTER ONE" (even if prefixed by words like "PREPARATORY:") → "first". "2ND SEMESTER" / "SECOND SEMESTER" / "SEMESTER TWO" → "second". Ignore decorative text on the same line as the heading (e.g. "RESEARCH ACTIVITY"). Every row in a table gets that table's semester.
+8. SERIAL NUMBERS: if the table has an S/N column, put it in "sn" for every row. S/N often continues across semesters (1-8, then 9-15); include all of them.
+9. "printedTotals": copy ONLY the semester credit totals that are printed (e.g. "SEMESTER'S CREDITS: 24"). Do not compute anything.
+10. Ignore summary lines (semester credits, grade points, GPA, CGPA), the year/CGPA summary table and the grading-scale legend as course rows. They are NOT course rows.
+11. Return ONLY the JSON object. No markdown, no comments.`;
 
-  const imageParts = [];
-  let combinedPdfText = "";
+  const pages = await loadPageSources(fileList);
+  if (!pages.length) throw new Error("No readable files were provided.");
 
-  for (const f of fileList) {
-    const url = f?.url || f?.secure_url || f?.fileUrl;
-    const mime = f?.mimeType || f?.mimetype || "";
-    if (!url) continue;
+  const rawRows = [];
+  const warnings = [];
 
-    if (mime.startsWith("image/")) {
-      imageParts.push({ type: "image_url", image_url: { url } });
-    } else if (mime === "application/pdf") {
-      const text = await fetchPdfText(url);
-      combinedPdfText += `\n\n--- PDF PAGE ---\n\n${text}`;
-    } else {
-      throw new Error(`Unsupported file type: ${mime || "unknown"}`);
+  for (let i = 0; i < pages.length; i++) {
+    const page = await parseOnePage(pages[i], prompt, i + 1, pages.length);
+
+    // Fill missing sessions from the same page (same level first)
+    const pageSession = mostCommon(page.rows.map((r) => normalizeSession(r?.session)));
+    for (const r of page.rows) {
+      const lvl = normalizeLevel(r?.level);
+      const lvlSession = mostCommon(
+        page.rows
+          .filter((x) => normalizeLevel(x?.level) === lvl)
+          .map((x) => normalizeSession(x?.session))
+      );
+      r.session = normalizeSession(r?.session) || lvlSession || pageSession || null;
+      rawRows.push(r);
     }
+
+    page.problems.forEach((p) => warnings.push(`Page ${i + 1}: ${p}`));
   }
-
-  if (!imageParts.length && !combinedPdfText.trim()) {
-    throw new Error("No readable files were provided.");
-  }
-
-  let kind;
-  let messages;
-
-  if (imageParts.length) {
-    kind = "vision";
-    const text = combinedPdfText.trim()
-      ? `${prompt}\n\n--- EXTRA PDF TEXT ---${combinedPdfText}`
-      : prompt;
-    messages = [{ role: "user", content: [{ type: "text", text }, ...imageParts] }];
-  } else {
-    kind = "text";
-    messages = [{ role: "user", content: `${prompt}\n\n--- DOCUMENT TEXT ---${combinedPdfText}` }];
-  }
-
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 16384 });
-  const parsed = safeJsonParse(raw);
-
-  const rawRows = Array.isArray(parsed?.rows) ? parsed.rows : [];
 
   // Fallback session is chosen PER LEVEL, so different levels never get merged into one session.
   // Rows with no level fall back to the most common session overall.
@@ -617,9 +796,8 @@ CRITICAL RULES:
       )
     );
   }
-  const globalSession = levels.length
-    ? null
-    : mostCommon(rawRows.map((r) => normalizeSession(r?.session)));
+  // FIX: previously null whenever any row had a level, which left level-less rows without a session
+  const globalSession = mostCommon(rawRows.map((r) => normalizeSession(r?.session)));
 
   const rows = rawRows.map((r) => {
     const scoreNum =
@@ -631,9 +809,21 @@ CRITICAL RULES:
     const level = isLecturer ? null : normalizeLevel(r.level);
 
     return {
-      matricNumber: null,
-      courseCode: isLecturer ? courseCode : r.courseCode ? String(r.courseCode).toUpperCase().replace(/\s+/g, "").trim() : null,
-      courseTitle: r.courseTitle ? String(r.courseTitle).trim() : isLecturer ? courseTitle || null : null,
+      // FIX: lecturer sheets can now carry matric numbers so students get matched
+      matricNumber:
+        isLecturer && r.matricNumber
+          ? String(r.matricNumber).toUpperCase().replace(/\s+/g, "").trim()
+          : null,
+      courseCode: isLecturer
+        ? courseCode
+        : r.courseCode
+        ? String(r.courseCode).toUpperCase().replace(/\s+/g, "").trim()
+        : null,
+      courseTitle: r.courseTitle
+        ? String(r.courseTitle).trim()
+        : isLecturer
+        ? courseTitle || null
+        : null,
       units: isLecturer ? units : r.units != null ? Number(r.units) : null,
       score: scoreNum,
       grade,
@@ -649,7 +839,7 @@ CRITICAL RULES:
     };
   });
 
-  return { rows, warnings: [] };
+  return { rows, warnings };
 };
 
 export const summarizeContent = async ({ fileUrl, mimeType, title }) => {

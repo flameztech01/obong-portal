@@ -10,6 +10,7 @@ import Enrollment from "../models/enrollmentModel.js";
 import CourseRep from "../models/courseRepModel.js";
 import Settings from "../models/settingsModel.js";
 import AuditLog from "../models/auditLogModel.js";
+import AcademicSession from "../models/academicSessionModel.js";
 import {
   parseCalendarDocument,
   parseResultDocument,
@@ -175,7 +176,7 @@ export const parseResult = async (req, res) => {
 
     const upload = await ResultUpload.findById(uploadId)
       .populate("offering", "course level department semester")
-      .populate("uploadedBy", "isTransferStudent");
+      .populate("uploadedBy", "isTransferStudent level");
 
     if (!upload) return res.status(404).json({ message: "Upload not found" });
 
@@ -246,14 +247,35 @@ export const parseResult = async (req, res) => {
         : [];
       const studentMap = new Map(students.map((s) => [s.matricNumber, s]));
 
+      // For self-uploads where the document prints a level but no session
+      // (e.g. "LEVEL 200" only), estimate the session from the student's current level.
+      // Every estimated row carries a warning so it can be confirmed in review.
+      const currentSession =
+        upload.type === "self" ? await AcademicSession.findOne({ isCurrent: true }) : null;
+      const assumedStartYear = currentSession
+        ? parseInt(String(currentSession.name).slice(0, 4), 10)
+        : null;
+      const uploaderLevel = Number(upload.uploadedBy?.level) || null;
+
       const matchedRows = rows.map((r) => {
         const student = r.matricNumber ? studentMap.get(r.matricNumber) : null;
         const rowWarnings = [...(r.warnings || [])];
 
         // Self-uploads: the row belongs to the uploader, no matric match needed
         if (upload.type === "self") {
+          let session = r.session;
+          if (!session && r.level && assumedStartYear && uploaderLevel) {
+            const y = assumedStartYear - (uploaderLevel - r.level) / 100;
+            if (Number.isInteger(y)) {
+              session = `${y}/${y + 1}`;
+              rowWarnings.push(
+                `Session not printed on the document, assumed ${session} from level ${r.level}. Please confirm.`
+              );
+            }
+          }
           return {
             ...r,
+            session,
             student: upload.uploadedBy._id,
             matched: true,
             warnings: rowWarnings,
