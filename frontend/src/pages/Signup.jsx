@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { 
   useSignupMutation, 
   useVerifyOtpMutation, 
   useResendOtpMutation,
   useGetDepartmentsQuery,
+  useGetMeQuery,
 } from '../features/authApiSlice';
 import { setCredentials } from '../features/auth/authSlice';
 import { useToast } from '../components/Toast';
@@ -172,6 +173,20 @@ const CustomSelect = ({
 };
 
 /* =========================================
+   AUTH CHECK LOADER
+   ========================================= */
+const AuthCheckLoader = ({ message = 'Redirecting...' }) => (
+  <div className="h-[100dvh] w-full bg-zinc-950 flex items-center justify-center">
+    <div className="flex flex-col items-center gap-3">
+      <div className="w-8 h-8 border-2 border-zinc-700 border-t-yellow-500 rounded-full animate-spin" />
+      <p className="text-zinc-500 text-[10px] uppercase tracking-[0.2em] font-semibold">
+        {message}
+      </p>
+    </div>
+  </div>
+);
+
+/* =========================================
    MAIN SIGNUP COMPONENT
    ========================================= */
 const Signup = () => {
@@ -179,12 +194,33 @@ const Signup = () => {
   const dispatch = useDispatch();
   const toast = useToast();
   
-  // API Hooks
+  /* -------------------------------------------
+     AUTH GUARD — redirect if already logged in
+     ------------------------------------------- */
+  const token = useSelector((state) => state.auth?.userInfo?.token);
+
+  // Only hit /me if there's no token — saves a call when we already know we're authed
+  const { 
+    data: meData, 
+    isLoading: isMeLoading,
+  } = useGetMeQuery(undefined, { skip: !!token });
+
+  const isAuthenticated = !!token || !!meData?.user;
+  const isCheckingAuth = !token && isMeLoading;
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      navigate('/dashboard', { replace: true });
+    }
+  }, [isAuthenticated, navigate]);
+  
+  /* -------------------------------------------
+     API Hooks
+     ------------------------------------------- */
   const [signup, { isLoading: isSigningUp }] = useSignupMutation();
   const [verifyOtp, { isLoading: isVerifying }] = useVerifyOtpMutation();
   const [resendOtp, { isLoading: isResending }] = useResendOtpMutation();
 
-  // Real departments from backend
   const { 
     data: deptData, 
     isLoading: isDeptLoading,
@@ -222,9 +258,9 @@ const Signup = () => {
     { value: '500', label: '500 Level' },
   ];
 
-  /* =========================================
+  /* -------------------------------------------
      HANDLERS
-     ========================================= */
+     ------------------------------------------- */
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
@@ -298,6 +334,13 @@ const Signup = () => {
       toast.error(err?.data?.message || 'Failed to resend OTP.');
     }
   };
+
+  /* -------------------------------------------
+     GATE — block render while checking / redirecting
+     ------------------------------------------- */
+  if (isAuthenticated || isCheckingAuth) {
+    return <AuthCheckLoader message="Already signed in" />;
+  }
 
   return (
     <div className="h-[100dvh] w-full flex flex-col overflow-hidden bg-zinc-950 font-sans selection:bg-zinc-800 selection:text-white">

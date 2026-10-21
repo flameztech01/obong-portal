@@ -1,21 +1,77 @@
 // src/pages/Login.jsx
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { Link, useNavigate } from 'react-router';
-import { useDispatch } from 'react-redux';
+import { useDispatch, useSelector } from 'react-redux';
 import { 
   useLoginMutation, 
   useVerifyOtpMutation, 
-  useResendOtpMutation 
+  useResendOtpMutation,
+  useGetMeQuery,
 } from '../features/authApiSlice';
 import { setCredentials } from '../features/auth/authSlice'; 
 import { useToast } from '../components/Toast';
+
+/* =========================================
+   AUTH CHECK LOADER
+   ========================================= */
+const AuthCheckLoader = ({ message = 'Redirecting...' }) => (
+  <div className="h-[100dvh] w-full bg-zinc-950 flex items-center justify-center">
+    <div className="flex flex-col items-center gap-3">
+      <div className="w-8 h-8 border-2 border-zinc-700 border-t-yellow-500 rounded-full animate-spin" />
+      <p className="text-zinc-500 text-[10px] uppercase tracking-[0.2em] font-semibold">
+        {message}
+      </p>
+    </div>
+  </div>
+);
+
+/* =========================================
+   ROLE-BASED REDIRECT HELPER
+   ========================================= */
+const getHomeRoute = (user) => {
+  if (!user) return '/dashboard';
+  const role = user.role;
+  if (role === 'admin') return '/superuser/dashboard';
+  if (role === 'lecturer') return '/lecturer/dashboard';
+
+  // Student
+  if (user.hasUploadedHistoricalResults === false) {
+    // Note: nextStep is what the backend tells us post-OTP. On a fresh
+    // refresh we rely on hasUploadedHistoricalResults from /me.
+    return '/upload-results';
+  }
+  return '/dashboard';
+};
 
 const Login = () => {
   const navigate = useNavigate();
   const dispatch = useDispatch();
   const toast = useToast();
 
-  // API Hooks
+  /* -------------------------------------------
+     AUTH GUARD — redirect if already logged in
+     ------------------------------------------- */
+  const reduxUser = useSelector((state) => state.auth?.userInfo);
+  const token = reduxUser?.token;
+
+  const { 
+    data: meData, 
+    isLoading: isMeLoading,
+  } = useGetMeQuery(undefined, { skip: !!token });
+
+  const authedUser = reduxUser || meData?.user;
+  const isAuthenticated = !!token || !!meData?.user;
+  const isCheckingAuth = !token && isMeLoading;
+
+  useEffect(() => {
+    if (isAuthenticated && authedUser) {
+      navigate(getHomeRoute(authedUser), { replace: true });
+    }
+  }, [isAuthenticated, authedUser, navigate]);
+
+  /* -------------------------------------------
+     API Hooks
+     ------------------------------------------- */
   const [login, { isLoading: isLoggingIn }] = useLoginMutation();
   const [verifyOtp, { isLoading: isVerifying }] = useVerifyOtpMutation();
   const [resendOtp, { isLoading: isResending }] = useResendOtpMutation();
@@ -37,8 +93,8 @@ const Login = () => {
 
     try {
       const result = await login({ identifier }).unwrap();
-      setOtpIdentifier(result.identifier); // Save the returned identifier
-      setStep('otp'); // Move to OTP step
+      setOtpIdentifier(result.identifier);
+      setStep('otp');
       toast.success("OTP sent to your email!");
     } catch (err) {
       toast.error(err?.data?.message || 'Failed to find account. Please try again.');
@@ -48,17 +104,15 @@ const Login = () => {
   const handleOtpChange = (index, value) => {
     if (isNaN(value)) return;
     const newOtp = [...otpArray];
-    newOtp[index] = value.substring(value.length - 1); // Only allow 1 character
+    newOtp[index] = value.substring(value.length - 1);
     setOtpArray(newOtp);
 
-    // Auto-focus next input
     if (value && index < 5) {
       otpRefs.current[index + 1].focus();
     }
   };
 
   const handleOtpKeyDown = (index, e) => {
-    // Auto-focus previous input on Backspace
     if (e.key === 'Backspace' && !otpArray[index] && index > 0) {
       otpRefs.current[index - 1].focus();
     }
@@ -75,12 +129,9 @@ const Login = () => {
     try {
       const result = await verifyOtp({ identifier: otpIdentifier, otp: otpCode }).unwrap();
       
-      // ✅ Store token inside userInfo — apiSlice reads state.auth.userInfo.token
       dispatch(setCredentials({ ...result.user, token: result.token }));
-      
       toast.success("Logged in successfully!");
 
-      // 👇 ROLE-BASED REDIRECT LOGIC
       const role = result.user?.role;
 
       if (role === 'admin') {
@@ -88,7 +139,6 @@ const Login = () => {
       } else if (role === 'lecturer') {
         navigate('/lecturer/dashboard');
       } else {
-        // It's a student
         if (result.nextStep === 'UPLOAD_HISTORICAL_RESULTS') {
           navigate('/upload-results');
         } else {
@@ -110,12 +160,17 @@ const Login = () => {
     }
   };
 
+  /* -------------------------------------------
+     GATE — block render while checking / redirecting
+     ------------------------------------------- */
+  if (isAuthenticated || isCheckingAuth) {
+    return <AuthCheckLoader message="Already signed in" />;
+  }
+
   return (
     <div className="h-[100dvh] w-full flex flex-col overflow-hidden bg-zinc-950 font-sans selection:bg-zinc-800 selection:text-white">
       
-      {/* =========================================
-          FIXED TOP BAR
-          ========================================= */}
+      {/* FIXED TOP BAR */}
       <header className="shrink-0 h-16 w-full z-50 bg-zinc-950/80 backdrop-blur-md border-b border-zinc-800 flex items-center justify-between px-6 md:px-10">
         <Link to="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity">
           <img src="/logo.png" alt="Logo" className="w-8 h-8 md:w-10 md:h-10 object-contain" />
@@ -134,21 +189,17 @@ const Login = () => {
         </Link>
       </header>
 
-      {/* Top Ribbon (School Colors) */}
+      {/* Top Ribbon */}
       <div className="shrink-0 w-full h-1 flex z-50">
         <div className="flex-1 bg-red-700"></div>
         <div className="flex-1 bg-yellow-500"></div>
         <div className="flex-1 bg-green-700"></div>
       </div>
 
-      {/* =========================================
-          MAIN SPLIT LAYOUT
-          ========================================= */}
+      {/* MAIN SPLIT LAYOUT */}
       <main className="flex-1 flex flex-col lg:flex-row min-h-0">
         
-        {/* -----------------------------------------
-            LEFT SIDE: FIXED HEIGHT, NO SCROLL
-            ----------------------------------------- */}
+        {/* LEFT SIDE */}
         <div className="hidden lg:flex w-1/2 h-full relative bg-zinc-900 border-r border-zinc-800 flex-col justify-center px-16 xl:px-24 overflow-hidden">
           <div className="absolute inset-0 bg-[url('https://images.unsplash.com/photo-1541339907198-e08756dedf3f?q=80&w=2070&auto=format&fit=crop')] bg-cover bg-center bg-no-repeat opacity-20"></div>
           <div className="absolute inset-0 bg-gradient-to-r from-zinc-950 via-zinc-950/90 to-transparent"></div>
@@ -198,9 +249,7 @@ const Login = () => {
           </div>
         </div>
 
-        {/* -----------------------------------------
-            RIGHT SIDE: SCROLLABLE FORM
-            ----------------------------------------- */}
+        {/* RIGHT SIDE */}
         <div className="w-full lg:w-1/2 h-full bg-zinc-950 overflow-y-auto custom-scrollbar">
           <div className="flex min-h-full items-center justify-center p-6 md:p-12">
             
@@ -228,9 +277,7 @@ const Login = () => {
                 </p>
               </div>
 
-              {/* =========================================
-                  STEP 1: IDENTIFIER FORM
-                  ========================================= */}
+              {/* STEP 1: IDENTIFIER */}
               {step === 'identifier' && (
                 <form onSubmit={handleRequestOtp} className="space-y-6 pb-10">
                   
@@ -281,13 +328,10 @@ const Login = () => {
                 </form>
               )}
 
-              {/* =========================================
-                  STEP 2: OTP VERIFICATION
-                  ========================================= */}
+              {/* STEP 2: OTP */}
               {step === 'otp' && (
                 <form onSubmit={handleVerifyOtp} className="space-y-6 pb-10">
                   
-                  {/* OTP Input Grid */}
                   <div className="flex justify-between gap-2">
                     {otpArray.map((digit, index) => (
                       <input
