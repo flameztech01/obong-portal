@@ -20,11 +20,10 @@ const unique = (arr) => [...new Set(arr.filter(Boolean))];
 const TEXT_CANDIDATES = unique([
   process.env.GROQ_TEXT_MODEL,
   ...splitEnv(process.env.GROQ_TEXT_MODELS),
-  "openai/gpt-oss-120b",
-  "openai/gpt-oss-20b",
-  "qwen/qwen3.8-27b",
   "llama-3.3-70b-versatile",
   "llama-3.1-8b-instant",
+  "qwen/qwen3.8-27b",
+  "openai/gpt-oss-20b",
 ]);
 
 // (llama-3.2-*-vision-preview removed: decommissioned)
@@ -45,10 +44,13 @@ const MODEL_MAX_COMPLETION = {
   "llama-3.3-70b-versatile": 32768,
 };
 
-const DEFAULT_MAX_TOKENS = 8192;
-const MIN_MAX_TOKENS = 2048;
+// 🚨 LOWERED TO FIT WITHIN GROQ'S 8000 TPM FREE TIER LIMIT
+const DEFAULT_MAX_TOKENS = 2048;
+const MIN_MAX_TOKENS = 512;
 const DEFAULT_TEMPERATURE = 0.2;
-const MAX_DOC_CHARS = Number(process.env.GROQ_MAX_DOC_CHARS) || 60000;
+
+// 🚨 MAX CHARACTERS FOR PDF TEXT (~3,000 tokens) so we don't exceed the 8k limit
+const MAX_DOC_CHARS = 12000; 
 
 const MODEL_LIST_TTL_MS = 10 * 60 * 1000;
 const DEAD_MODEL_TTL_MS = 10 * 60 * 1000;
@@ -99,7 +101,7 @@ const resolveCandidates = async (kind) => {
     list = preferred.filter((id) => available.includes(id));
     const discovered = available.filter((id) => {
       if (list.includes(id) || NON_CHAT_PATTERN.test(id)) return false;
-      return kind === "vision" ? VISION_ID_PATTERN.test(id) : /gpt-oss|qwen/i.test(id);
+      return kind === "vision" ? VISION_ID_PATTERN.test(id) : /gpt-oss|qwen|llama/i.test(id);
     });
     list = [...list, ...discovered];
   } else {
@@ -200,8 +202,10 @@ const fetchPdfText = async (url) => {
       "PDF appears to be a scanned image (no extractable text). Upload a clear photo instead."
     );
   }
+  
+  // Truncate heavily to avoid 413 Payload Too Large errors on Groq
   return text.length > MAX_DOC_CHARS
-    ? `${text.slice(0, MAX_DOC_CHARS)}\n\n[...document truncated...]`
+    ? `${text.slice(0, MAX_DOC_CHARS)}\n\n[...document truncated to fit AI limits...]`
     : text;
 };
 
@@ -613,7 +617,7 @@ const parseOnePage = async (page, prompt, pageNo, total) => {
           messages: [{ role: "user", content: `${text}\n\n--- DOCUMENT TEXT ---\n${page.text}` }],
         };
 
-    const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 16384, temperature: 0 });
+    const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 4096, temperature: 0 });
     const parsed = safeJsonParse(raw);
     return {
       rows: Array.isArray(parsed?.rows) ? parsed.rows : [],
@@ -670,7 +674,7 @@ Rules:
 - Return ONLY the JSON object.`;
 
   const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true });
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 2048 });
   const parsed = safeJsonParse(raw);
 
   const pickDate = (key) => {
@@ -845,12 +849,18 @@ CRITICAL RULES:
 export const summarizeContent = async ({ fileUrl, mimeType, title }) => {
   const prompt = `Summarize the study material titled "${title}". Return JSON: { "summary": "", "keyPoints": [], "definitions": [{"term": "", "definition": ""}], "questionsToConsider": [] }`;
   const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192 });
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 2048 });
   return safeJsonParse(raw);
 };
 
 export const chatAboutContent = async ({ fileUrl, mimeType, materialTitle, history, userMessage }) => {
-  const systemPrompt = `You are a friendly study assistant for "${materialTitle}".`;
+  // 🚨 FORCE CONVERSATIONAL FORMATTING (no markdown headers, no textbook dumps)
+  const systemPrompt = `You are a helpful, friendly study assistant for "${materialTitle}". 
+Answer the user's questions clearly and naturally. 
+Use short, conversational paragraphs. 
+Do NOT use markdown headers (like ###), huge bulleted lists, or textbook-style structures unless the user explicitly asks for a list. 
+Keep your answers concise and focused on exactly what the user asked.`;
+
   let contextContent;
   let kind;
 
@@ -867,21 +877,24 @@ export const chatAboutContent = async ({ fileUrl, mimeType, materialTitle, histo
     throw new Error(`Unsupported file type: ${mimeType}`);
   }
 
-  const safeHistory = Array.isArray(history) ? history.slice(-20) : [];
+  // Only keep the last 4 messages to save tokens
+  const safeHistory = Array.isArray(history) ? history.slice(-4) : [];
+  
   const messages = [
     { role: "system", content: systemPrompt },
     { role: "user", content: contextContent },
     ...safeHistory,
-    { role: "user", content: String(userMessage).slice(0, 4000) },
+    { role: "user", content: String(userMessage).slice(0, 1000) },
   ];
 
-  return runChat({ kind, messages, maxTokens: 4096, temperature: 0.4 });
+  // maxTokens is set to 2048 to leave enough room for the input context
+  return runChat({ kind, messages, maxTokens: 2048, temperature: 0.4 });
 };
 
 export const generateQuizQuestions = async ({ fileUrl, mimeType, materialTitle, count = 5, types = ["mcq"], marksPerQuestion = 1 }) => {
   const prompt = `Generate ${count} quiz questions from "${materialTitle}". Return JSON: { "questions": [{ "type": "mcq" | "theory", "question": "", "options": [], "correctAnswer": "", "modelAnswer": "", "marks": ${marksPerQuestion} }] }`;
   const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192 });
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 2048 });
   const parsed = safeJsonParse(raw);
   return Array.isArray(parsed?.questions) ? parsed.questions : [];
 };
@@ -918,7 +931,7 @@ CRITICAL RULES:
 6. Return ONLY the JSON object. No markdown, no comments.`;
 
   const { kind, messages } = await buildDocumentUserMessage(fileUrl, mimeType, prompt);
-  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 8192 });
+  const raw = await runChat({ kind, messages, jsonMode: true, maxTokens: 2048 });
   const parsed = safeJsonParse(raw);
 
   return Array.isArray(parsed?.courses) ? parsed.courses : [];

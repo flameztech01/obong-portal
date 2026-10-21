@@ -47,37 +47,13 @@ const getSettingsDoc = async () => {
   return s;
 };
 
+// Since you want no restrictions, anyone who is logged in can manage/view.
 const userCanManageOffering = async (user, offering) => {
-  if (user.role === "admin") return true;
-  if (user.role === "lecturer" && String(offering.lecturer) === String(user.id)) {
-    return true;
-  }
-  if (
-    user.extraRoles?.includes("hod") &&
-    (user.scope?.departments || []).map(String).includes(String(offering.department))
-  ) {
-    return true;
-  }
-  if (user.extraRoles?.includes("course_rep")) {
-    const rep = await CourseRep.findOne({
-      user: user.id,
-      offering: offering._id,
-      isActive: true,
-    });
-    if (rep) return true;
-  }
-  return false;
+  return true; // Open to all authenticated users
 };
 
 const userCanViewOfferingContent = async (user, offering) => {
-  if (await userCanManageOffering(user, offering)) return true;
-  if (
-    user.role === "student" &&
-    (await Enrollment.exists({ student: user.id, offering: offering._id }))
-  ) {
-    return true;
-  }
-  return false;
+  return true; // Open to all authenticated users
 };
 
 const sanitizeError = (err) => {
@@ -103,9 +79,6 @@ const uploadBufferToCloudinary = (file, folder) =>
    1. PARSE CALENDAR
    ============================================================ */
 
-// @desc    AI-parse an uploaded school calendar
-// @route   POST /api/ai/parse/calendar
-// @access  Admin
 export const parseCalendar = async (req, res) => {
   try {
     if (req.user.role !== "admin") {
@@ -164,9 +137,6 @@ export const parseCalendar = async (req, res) => {
    2. PARSE RESULT
    ============================================================ */
 
-// @desc    AI-parse a result upload (one or many pages) and match matric numbers
-// @route   POST /api/ai/parse/result
-// @access  Uploader / Admin / assigned lecturer / HOD
 export const parseResult = async (req, res) => {
   try {
     const { uploadId } = req.body;
@@ -180,7 +150,6 @@ export const parseResult = async (req, res) => {
 
     if (!upload) return res.status(404).json({ message: "Upload not found" });
 
-    // New multi-file format, with fallback to the legacy single file
     const files =
       Array.isArray(upload.fileUrls) && upload.fileUrls.length
         ? upload.fileUrls
@@ -194,18 +163,6 @@ export const parseResult = async (req, res) => {
       return res
         .status(400)
         .json({ message: "Upload has no document to parse (manual rows?)" });
-    }
-
-    // Permission check
-    const isUploader = String(upload.uploadedBy?._id) === String(req.user.id);
-    const isAdmin = req.user.role === "admin";
-    let isManager = false;
-    if (upload.offering) {
-      const offering = await CourseOffering.findById(upload.offering._id);
-      isManager = offering && (await userCanManageOffering(req.user, offering));
-    }
-    if (!isUploader && !isAdmin && !isManager) {
-      return res.status(403).json({ message: "Not allowed" });
     }
 
     upload.parsingStatus = "processing";
@@ -247,9 +204,6 @@ export const parseResult = async (req, res) => {
         : [];
       const studentMap = new Map(students.map((s) => [s.matricNumber, s]));
 
-      // For self-uploads where the document prints a level but no session
-      // (e.g. "LEVEL 200" only), estimate the session from the student's current level.
-      // Every estimated row carries a warning so it can be confirmed in review.
       const currentSession =
         upload.type === "self" ? await AcademicSession.findOne({ isCurrent: true }) : null;
       const assumedStartYear = currentSession
@@ -261,7 +215,6 @@ export const parseResult = async (req, res) => {
         const student = r.matricNumber ? studentMap.get(r.matricNumber) : null;
         const rowWarnings = [...(r.warnings || [])];
 
-        // Self-uploads: the row belongs to the uploader, no matric match needed
         if (upload.type === "self") {
           let session = r.session;
           if (!session && r.level && assumedStartYear && uploaderLevel) {
@@ -348,28 +301,11 @@ export const parseResult = async (req, res) => {
    2B. PARSE COURSE ALLOCATION DOCUMENT
    ============================================================ */
 
-// @desc    AI-parse a course allocation PDF/image into a course list
-// @route   POST /api/ai/parse/courses
-// @access  Admin / HOD / Student Admin
 export const parseCourseDocument = async (req, res) => {
   let uploaded = null;
   let resourceType = "image";
 
   try {
-    const isAdmin = req.user.role === "admin";
-    const isHod = req.user.extraRoles?.includes("hod");
-    const isStudentAdmin = req.user.extraRoles?.includes("student_admin");
-
-    // Student admins are allowed to parse course documents for their scoped
-    // levels/departments. Actual persistence happens via the courses bulk-create
-    // endpoint, which enforces the scope again.
-    if (!isAdmin && !isHod && !isStudentAdmin) {
-      return res.status(403).json({
-        message:
-          "Only admins, HODs, and student admins can parse course documents",
-      });
-    }
-
     const file =
       req.files?.document?.[0] ||
       (Array.isArray(req.files) ? req.files[0] : null) ||
@@ -402,7 +338,6 @@ export const parseCourseDocument = async (req, res) => {
 
       await logAudit(req, "ai_parse", "course_allocation", null, {
         courses: courses.length,
-        actedAs: isAdmin ? "admin" : isHod ? "hod" : "student_admin",
       });
 
       return res.json({
@@ -420,7 +355,6 @@ export const parseCourseDocument = async (req, res) => {
     console.error("parseCourseDocument error:", err);
     return res.status(500).json({ message: "Server error" });
   } finally {
-    // The file is only needed for parsing
     if (uploaded?.public_id) {
       try {
         await cloudinary.uploader.destroy(uploaded.public_id, {
@@ -437,9 +371,6 @@ export const parseCourseDocument = async (req, res) => {
    3. SUMMARIZE MATERIAL
    ============================================================ */
 
-// @desc    AI-summarize a study material
-// @route   POST /api/ai/summarize
-// @access  Anyone who can view the material
 export const summarizeMaterial = async (req, res) => {
   try {
     const { materialId } = req.body;
@@ -449,13 +380,6 @@ export const summarizeMaterial = async (req, res) => {
 
     const material = await Material.findById(materialId);
     if (!material) return res.status(404).json({ message: "Material not found" });
-
-    const offering = await CourseOffering.findById(material.offering);
-    if (!offering) return res.status(404).json({ message: "Offering not found" });
-
-    if (!(await userCanViewOfferingContent(req.user, offering))) {
-      return res.status(403).json({ message: "Not allowed" });
-    }
 
     try {
       const summary = await summarizeContent({
@@ -487,9 +411,6 @@ export const summarizeMaterial = async (req, res) => {
    4. STUDY CHAT
    ============================================================ */
 
-// @desc    Chat with AI about a study material
-// @route   POST /api/ai/chat
-// @access  Anyone who can view the material
 export const chatWithMaterial = async (req, res) => {
   try {
     const { materialId, message, history } = req.body;
@@ -504,11 +425,6 @@ export const chatWithMaterial = async (req, res) => {
 
     const material = await Material.findById(materialId);
     if (!material) return res.status(404).json({ message: "Material not found" });
-
-    const offering = await CourseOffering.findById(material.offering);
-    if (!(await userCanViewOfferingContent(req.user, offering))) {
-      return res.status(403).json({ message: "Not allowed" });
-    }
 
     try {
       const reply = await chatAboutContent({
@@ -538,9 +454,6 @@ export const chatWithMaterial = async (req, res) => {
    5. GENERATE QUIZ
    ============================================================ */
 
-// @desc    Generate a draft quiz from a material (AI)
-// @route   POST /api/ai/generate-quiz
-// @access  Lecturer / HOD / Admin / approved course rep
 export const generateQuiz = async (req, res) => {
   try {
     const {
@@ -570,23 +483,6 @@ export const generateQuiz = async (req, res) => {
       "code title"
     );
     if (!offering) return res.status(404).json({ message: "Offering not found" });
-
-    const settings = await getSettingsDoc();
-    const isManager = await userCanManageOffering(req.user, offering);
-    const isRep = req.user.extraRoles?.includes("course_rep")
-      ? await CourseRep.exists({
-          user: req.user.id,
-          offering: offering._id,
-          isActive: true,
-        })
-      : false;
-
-    if (!isManager && !(isRep && settings.allowStudentQuizGeneration)) {
-      return res.status(403).json({
-        message:
-          "Only the assigned lecturer, HOD, admin or an approved course rep can generate quizzes",
-      });
-    }
 
     try {
       const rawQuestions = await generateQuizQuestions({
