@@ -90,6 +90,19 @@ const sessionNameForLevel = (currentSessionName, currentLevel, targetLevel) => {
   return `${startYear}/${startYear + 1}`;
 };
 
+// Duplicate = same code + department + session (a course can exist once per set)
+const normalizeSession = (s) => {
+  const clean = s ? String(s).trim() : "";
+  return clean || null;
+};
+
+const findDuplicateCourse = (code, department, session) =>
+  Course.findOne({
+    code,
+    department,
+    session: normalizeSession(session),
+  });
+
 /* ---------- permission helpers ---------- */
 
 const userCanManageCatalog = (user, departmentId, level) => {
@@ -100,6 +113,15 @@ const userCanManageCatalog = (user, departmentId, level) => {
   const levels = (user.scope?.levels || []).map(Number);
   const depts = (user.scope?.departments || []).map(String);
   return levels.includes(Number(level)) && depts.includes(String(departmentId));
+};
+
+// Admin: any course. Student admin / team member: courses in their scope that
+// they added themselves (or older courses that have no recorded creator).
+const userCanDeleteCourse = (user, course) => {
+  if (user.role === "admin") return true;
+  if (!userCanManageCatalog(user, course.department, course.level)) return false;
+  if (!course.createdBy) return true;
+  return String(course.createdBy) === String(user.id);
 };
 
 const userCanManageOffering = async (user, offering) => {
@@ -143,6 +165,7 @@ const sanitizeCourse = (c) => ({
   semester: c.semester || null,
   session: c.session || null,
   description: c.description || "",
+  createdBy: c.createdBy || null,
   createdAt: c.createdAt,
 });
 
@@ -315,10 +338,14 @@ export const createCourse = async (req, res) => {
     if (!dept) return res.status(404).json({ message: "Department not found" });
 
     const codeUpper = code.toUpperCase().trim();
-    const existing = await Course.findOne({ code: codeUpper, department });
+    const sessionValue = normalizeSession(session);
+
+    const existing = await findDuplicateCourse(codeUpper, department, sessionValue);
     if (existing) {
       return res.status(409).json({
-        message: `Course ${codeUpper} already exists for this department`,
+        message: `Course ${codeUpper} already exists for this department${
+          sessionValue ? ` in ${sessionValue}` : ""
+        }`,
       });
     }
 
@@ -329,15 +356,25 @@ export const createCourse = async (req, res) => {
       department,
       level: Number(level),
       semester: semester || null,
-      session: session || null,
+      session: sessionValue,
       description: description?.trim() || "",
+      createdBy: req.user.id,
     });
 
-    await logAudit(req, "create", "course", course._id, { code: course.code });
+    await logAudit(req, "create", "course", course._id, {
+      code: course.code,
+      session: sessionValue,
+    });
 
     return res.status(201).json({ message: "Course created", course: sanitizeCourse(course) });
   } catch (err) {
     console.error("createCourse error:", err);
+    if (err.code === 11000) {
+      return res.status(409).json({
+        message:
+          "Course already exists (database index still blocks same code across sessions — drop the old index).",
+      });
+    }
     return res.status(500).json({ message: "Server error" });
   }
 };
@@ -367,22 +404,33 @@ export const bulkCreateCourses = async (req, res) => {
       }
 
       const codeUpper = c.code.toUpperCase().trim();
-      const exists = await Course.findOne({ code: codeUpper, department: targetDept });
+      const sessionValue = normalizeSession(c.session);
+
+      const exists = await findDuplicateCourse(codeUpper, targetDept, sessionValue);
       if (exists) {
-        skipped.push(`${c.code}: Already exists`);
+        skipped.push(`${c.code}: Already exists${sessionValue ? ` in ${sessionValue}` : ""}`);
         continue;
       }
 
-      const newCourse = await Course.create({
-        code: codeUpper,
-        title: c.title.trim(),
-        units: Number(c.units),
-        level: Number(c.level),
-        department: targetDept,
-        semester: c.semester || null,
-        session: c.session || null,
-      });
-      added.push(newCourse.code);
+      try {
+        const newCourse = await Course.create({
+          code: codeUpper,
+          title: c.title.trim(),
+          units: Number(c.units),
+          level: Number(c.level),
+          department: targetDept,
+          semester: c.semester || null,
+          session: sessionValue,
+          createdBy: req.user.id,
+        });
+        added.push(newCourse.code);
+      } catch (err) {
+        if (err.code === 11000) {
+          skipped.push(`${c.code}: Blocked by database index`);
+          continue;
+        }
+        throw err;
+      }
     }
 
     await logAudit(req, "bulk_create", "course", null, {
@@ -391,10 +439,10 @@ export const bulkCreateCourses = async (req, res) => {
       skippedCount: skipped.length,
     });
 
-    return res.json({ 
-      message: "Bulk upload complete", 
-      added, 
-      skipped 
+    return res.json({
+      message: "Bulk upload complete",
+      added,
+      skipped,
     });
   } catch (err) {
     console.error("bulkCreateCourses error:", err);
@@ -421,7 +469,23 @@ export const updateCourse = async (req, res) => {
       course.units = Number(units);
     }
     if (semester !== undefined) course.semester = semester;
-    if (session !== undefined) course.session = session;
+    if (session !== undefined) {
+      const newSession = normalizeSession(session);
+      const clash = await Course.findOne({
+        _id: { $ne: course._id },
+        code: course.code,
+        department: course.department,
+        session: newSession,
+      });
+      if (clash) {
+        return res.status(409).json({
+          message: `Course ${course.code} already exists for this department${
+            newSession ? ` in ${newSession}` : ""
+          }`,
+        });
+      }
+      course.session = newSession;
+    }
     if (description !== undefined) course.description = description?.trim() || "";
 
     await course.save();
@@ -435,15 +499,20 @@ export const updateCourse = async (req, res) => {
 };
 
 // @desc    Delete a course (only if no offerings exist)
+//          Admin: any course. Student admin / team member: courses they added
+//          (within their scope).
 // @route   DELETE /api/academic/courses/:id
-// @access  Auth (admin only)
+// @access  Auth (scope-checked)
 export const deleteCourse = async (req, res) => {
   try {
-    if (req.user.role !== "admin") {
-      return res.status(403).json({ message: "Only admin can delete courses" });
-    }
     const course = await Course.findById(req.params.id);
     if (!course) return res.status(404).json({ message: "Course not found" });
+
+    if (!userCanDeleteCourse(req.user, course)) {
+      return res.status(403).json({
+        message: "You can only delete courses you added within your scope",
+      });
+    }
 
     const offeringCount = await CourseOffering.countDocuments({ course: course._id });
     if (offeringCount > 0) {
@@ -453,7 +522,10 @@ export const deleteCourse = async (req, res) => {
     }
 
     await Course.deleteOne({ _id: course._id });
-    await logAudit(req, "delete", "course", course._id, { code: course.code });
+    await logAudit(req, "delete", "course", course._id, {
+      code: course.code,
+      session: course.session || null,
+    });
 
     return res.json({ message: "Course deleted" });
   } catch (err) {

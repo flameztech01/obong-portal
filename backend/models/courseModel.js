@@ -42,29 +42,39 @@ const courseSchema = new Schema(
       enum: ["first", "second", null],
       default: null, // null means it applies to both or is unspecified
     },
-    // 👇 NEW: Tracks the academic session (e.g., "2024/2025")
+    // Tracks the academic session (e.g., "2024/2025")
     session: {
       type: String,
       default: null,
       trim: true,
     },
-    description: { 
-      type: String, 
-      default: "" 
+    description: {
+      type: String,
+      default: "",
     },
-    isActive: { 
-      type: Boolean, 
-      default: true 
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
+    // Who added this course (used so student admins can delete their own)
+    createdBy: {
+      type: Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
     },
   },
   { timestamps: true }
 );
 
-// A course code must be unique within a specific department
-courseSchema.index({ department: 1, code: 1 }, { unique: true });
+// A course code must be unique within a department AND session
+// (each set of students can have its own copy of the same course code)
+courseSchema.index({ department: 1, code: 1, session: 1 }, { unique: true });
 
 // Helps with querying courses by level and department
 courseSchema.index({ department: 1, level: 1 });
+
+// Helps with session-scoped listing
+courseSchema.index({ department: 1, level: 1, session: 1 });
 
 // Ensure the code is always uppercase before saving
 courseSchema.pre("save", function () {
