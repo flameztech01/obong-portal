@@ -712,6 +712,14 @@ const ChatModal = ({ isOpen, onClose, material }) => {
   const [input, setInput] = useState('');
   const scrollRef = useRef(null);
 
+  // Lock body scroll to prevent the whole page from shifting when keyboard opens
+  useEffect(() => {
+    if (!isOpen) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => { document.body.style.overflow = prev; };
+  }, [isOpen]);
+
   useEffect(() => {
     if (isOpen) {
       setMessages([{ role: 'assistant', content: `Hi! I've read "${material?.title}". Ask me anything about it.` }]);
@@ -744,10 +752,10 @@ const ChatModal = ({ isOpen, onClose, material }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center sm:p-4">
+    <div className="fixed inset-0 z-50 flex flex-col bg-zinc-900 sm:items-center sm:justify-center sm:p-4">
       <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
       
-      <div className="relative z-10 flex h-[100dvh] w-full flex-col bg-zinc-900 animate-in slide-in-from-bottom duration-300 sm:h-[80vh] sm:max-w-lg sm:rounded-2xl sm:border sm:border-zinc-800 sm:zoom-in-95">
+      <div className="relative z-10 flex h-[100dvh] w-full flex-col bg-zinc-900 sm:h-[80vh] sm:max-w-lg sm:rounded-2xl sm:border sm:border-zinc-800">
         
         {/* Drag handle (Mobile only) */}
         <div className="flex shrink-0 justify-center pb-1.5 pt-2.5 sm:hidden">
