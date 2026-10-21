@@ -711,13 +711,37 @@ const ChatModal = ({ isOpen, onClose, material }) => {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const scrollRef = useRef(null);
+  
+  // 🚨 BY FORCE FIX FOR MOBILE KEYBOARD
+  const [viewportHeight, setViewportHeight] = useState('100dvh');
 
-  // Lock body scroll to prevent the whole page from shifting when keyboard opens
   useEffect(() => {
     if (!isOpen) return;
-    const prev = document.body.style.overflow;
+    
+    // 1. Lock body scroll so the page behind doesn't jump
+    const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = 'hidden';
-    return () => { document.body.style.overflow = prev; };
+
+    // 2. Track visual viewport (which shrinks when keyboard opens)
+    const handleResize = () => {
+      if (window.visualViewport) {
+        setViewportHeight(`${window.visualViewport.height}px`);
+      }
+    };
+
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener('resize', handleResize);
+      window.visualViewport.addEventListener('scroll', handleResize);
+      handleResize();
+    }
+
+    return () => {
+      document.body.style.overflow = originalOverflow;
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', handleResize);
+        window.visualViewport.removeEventListener('scroll', handleResize);
+      }
+    };
   }, [isOpen]);
 
   useEffect(() => {
@@ -752,16 +776,17 @@ const ChatModal = ({ isOpen, onClose, material }) => {
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex flex-col bg-zinc-900 sm:items-center sm:justify-center sm:p-4">
-      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+    <div className="fixed inset-0 z-50 flex flex-col bg-black/70 backdrop-blur-sm sm:items-center sm:justify-center sm:p-4">
       
-      <div className="relative z-10 flex h-[100dvh] w-full flex-col bg-zinc-900 sm:h-[80vh] sm:max-w-lg sm:rounded-2xl sm:border sm:border-zinc-800">
+      {/* Desktop backdrop click-to-close (mobile wrapper handles it) */}
+      <div className="absolute inset-0 hidden sm:block" onClick={onClose} />
+      
+      {/* Main Chat Container - Locked to viewport height */}
+      <div 
+        className="relative z-10 flex w-full flex-col bg-zinc-900 sm:h-[80vh] sm:max-w-lg sm:rounded-2xl sm:border sm:border-zinc-800"
+        style={{ height: window.innerWidth < 640 ? viewportHeight : undefined }}
+      >
         
-        {/* Drag handle (Mobile only) */}
-        <div className="flex shrink-0 justify-center pb-1.5 pt-2.5 sm:hidden">
-          <div className="h-1 w-9 rounded-full bg-zinc-700" />
-        </div>
-
         {/* Header (Locked at the top) */}
         <div className="flex shrink-0 items-center justify-between gap-3 border-b border-zinc-800 bg-zinc-950/30 px-4 py-3">
           <div className="flex min-w-0 items-center gap-2.5">
@@ -773,7 +798,7 @@ const ChatModal = ({ isOpen, onClose, material }) => {
               <p className="truncate text-[10px] text-zinc-500 max-w-[180px]">{material?.title}</p>
             </div>
           </div>
-          <button onClick={onClose} className="flex h-7 w-7 items-center justify-center rounded-md bg-zinc-800 text-zinc-400 hover:text-white">
+          <button onClick={onClose} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-zinc-800 text-zinc-400 hover:text-white">
             <X className="h-3.5 w-3.5" strokeWidth={2.2} />
           </button>
         </div>
