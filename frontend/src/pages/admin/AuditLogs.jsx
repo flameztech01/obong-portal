@@ -1,212 +1,341 @@
 // src/pages/admin/AuditLogs.jsx
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Activity, 
-  ShieldCheck, 
   Search, 
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  Check,
   Filter,
-  User,
-  Database
+  Database,
 } from 'lucide-react';
 import { useListAuditLogsQuery } from '../../features/adminApiSlice';
 
-const Skeleton = ({ className }) => (
-  <div className={`animate-pulse bg-zinc-800 rounded-lg ${className}`}></div>
+// =========================================
+// SKELETON
+// =========================================
+const Skeleton = ({ className = '' }) => (
+  <div className={`animate-pulse rounded bg-zinc-800 ${className}`} />
 );
 
-/* =========================================
-   HELPERS
-   ========================================= */
-// Assigns a color to the action badge based on what happened
+// =========================================
+// COMPACT CUSTOM SELECT (matches other admin pages)
+// =========================================
+const CompactSelect = ({ options, value, onChange, placeholder }) => {
+  const [isOpen, setIsOpen] = useState(false);
+  const ref = useRef(null);
+
+  useEffect(() => {
+    const handleClickOutside = (e) => {
+      if (ref.current && !ref.current.contains(e.target)) setIsOpen(false);
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  const selected = options.find(o => o.value === value);
+
+  return (
+    <div className="relative w-full" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setIsOpen(!isOpen)}
+        className={`flex w-full items-center justify-between rounded-md border px-2.5 py-1.5 text-left text-[12px] transition-colors ${
+          isOpen 
+            ? 'border-yellow-500/50 bg-zinc-950 text-zinc-100 ring-1 ring-yellow-500/30' 
+            : 'border-zinc-800 bg-zinc-950 text-zinc-300 hover:border-zinc-700'
+        }`}
+      >
+        <span className={`truncate ${!selected ? 'text-zinc-600' : ''}`}>
+          {selected ? selected.label : placeholder}
+        </span>
+        <ChevronDown 
+          className={`h-3 w-3 shrink-0 text-zinc-500 transition-transform ${isOpen ? 'rotate-180' : ''}`} 
+          strokeWidth={2} 
+        />
+      </button>
+
+      {isOpen && (
+        <div className="absolute left-0 top-full z-50 mt-1 w-full overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-2xl shadow-black/60 animate-in fade-in">
+          <ul className="max-h-48 overflow-y-auto py-0.5 custom-scrollbar">
+            {options.map((option) => {
+              const active = value === option.value;
+              return (
+                <li key={option.value}>
+                  <button
+                    type="button"
+                    onClick={() => { onChange(option.value); setIsOpen(false); }}
+                    className={`flex w-full items-center justify-between px-3 py-1.5 text-left text-[11.5px] transition-colors ${
+                      active 
+                        ? 'bg-yellow-500/10 font-semibold text-yellow-500' 
+                        : 'text-zinc-300 hover:bg-zinc-800'
+                    }`}
+                  >
+                    <span className="truncate pr-2">{option.label}</span>
+                    {active && <Check className="h-3 w-3 shrink-0" strokeWidth={2.6} />}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+};
+
+// =========================================
+// HELPERS
+// =========================================
 const getActionColor = (action) => {
   const act = action?.toLowerCase() || '';
-  if (act.includes('create') || act.includes('add')) return 'bg-green-500/10 text-green-500 border-green-500/20';
-  if (act.includes('delete') || act.includes('revoke') || act.includes('suspend')) return 'bg-red-500/10 text-red-500 border-red-500/20';
-  if (act.includes('update') || act.includes('edit') || act.includes('status')) return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
-  if (act.includes('publish') || act.includes('approve') || act.includes('promote')) return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20';
-  if (act.includes('ai_') || act.includes('parse')) return 'bg-purple-500/10 text-purple-400 border-purple-500/20';
+  if (act.includes('create') || act.includes('add')) 
+    return 'bg-green-500/10 text-green-500 border-green-500/20';
+  if (act.includes('delete') || act.includes('revoke') || act.includes('suspend')) 
+    return 'bg-red-500/10 text-red-500 border-red-500/20';
+  if (act.includes('update') || act.includes('edit') || act.includes('status')) 
+    return 'bg-blue-500/10 text-blue-400 border-blue-500/20';
+  if (act.includes('publish') || act.includes('approve') || act.includes('promote')) 
+    return 'bg-yellow-500/10 text-yellow-500 border-yellow-500/20';
+  if (act.includes('ai_') || act.includes('parse')) 
+    return 'bg-purple-500/10 text-purple-400 border-purple-500/20';
   return 'bg-zinc-800 text-zinc-300 border-zinc-700';
 };
 
-// Safely formats the JSON meta object into a readable string
+const getInitials = (name) => {
+  if (!name) return 'SA';
+  return name
+    .split(' ')
+    .map(n => n[0])
+    .filter(Boolean)
+    .slice(0, 2)
+    .join('')
+    .toUpperCase();
+};
+
 const formatMeta = (meta) => {
-  if (!meta || Object.keys(meta).length === 0) return '—';
+  if (!meta || Object.keys(meta).length === 0) return null;
   try {
-    // If it has a 'changed' array, show that. Otherwise stringify.
-    if (meta.changed) return `Fields: ${meta.changed.join(', ')}`;
-    return Object.entries(meta)
-      .map(([k, v]) => `${k}: ${v}`)
-      .join(' • ');
+    if (Array.isArray(meta.changed)) return `Fields: ${meta.changed.join(', ')}`;
+    const entries = Object.entries(meta);
+    if (entries.length === 0) return null;
+    return entries.map(([k, v]) => `${k}: ${v}`).join(' • ');
   } catch {
-    return '—';
+    return null;
   }
 };
 
+const formatDate = (iso) => {
+  const d = new Date(iso);
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+};
+
+const formatTime = (iso) => {
+  const d = new Date(iso);
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+};
+
+// =========================================
+// MAIN COMPONENT
+// =========================================
 const AuditLogs = () => {
-  // State
   const [page, setPage] = useState(1);
   const [actionFilter, setActionFilter] = useState('');
   const [resourceFilter, setResourceFilter] = useState('');
 
-  // API
   const { data: logsData, isLoading } = useListAuditLogsQuery({ 
     page, 
     limit: 15, 
     action: actionFilter,
-    resource: resourceFilter 
+    resource: resourceFilter,
   });
 
   const logs = logsData?.logs || [];
   const totalPages = logsData?.pages || 1;
   const totalLogs = logsData?.total || 0;
+  const hasActiveFilter = actionFilter || resourceFilter;
+
+  const today = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  });
+
+  const actionOptions = [
+    { value: '',          label: 'All Actions' },
+    { value: 'create',    label: 'Create' },
+    { value: 'update',    label: 'Update' },
+    { value: 'delete',    label: 'Delete' },
+    { value: 'login',     label: 'Login' },
+    { value: 'publish',   label: 'Publish' },
+    { value: 'appoint',   label: 'Appoint' },
+    { value: 'revoke',    label: 'Revoke' },
+    { value: 'promote',   label: 'Promote' },
+    { value: 'ai_parse',  label: 'AI Parse' },
+  ];
+
+  const resourceOptions = [
+    { value: '',                 label: 'All Resources' },
+    { value: 'user',             label: 'User' },
+    { value: 'course',           label: 'Course' },
+    { value: 'result',           label: 'Result' },
+    { value: 'calendar',         label: 'Calendar' },
+    { value: 'department',       label: 'Department' },
+    { value: 'result_upload',    label: 'Result Upload' },
+    { value: 'settings',         label: 'Settings' },
+    { value: 'session',          label: 'Academic Session' },
+  ];
 
   return (
-    <div className="space-y-6 pb-24 animate-in fade-in duration-500 max-w-7xl mx-auto">
-      
-      {/* HEADER */}
-      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+    <div className="-mx-4 min-h-screen bg-zinc-950 px-4 pb-8 pt-4 animate-in fade-in duration-500 md:mx-0 md:bg-transparent md:px-0 md:pt-0">
+      <div className="mx-auto max-w-7xl space-y-4 md:space-y-5">
+
+        {/* HEADER */}
         <div>
-          <h1 className="text-2xl md:text-3xl font-serif text-white tracking-tight">System Audit Logs</h1>
-          <p className="text-zinc-400 text-sm mt-1">Immutable record of all actions taken within the platform.</p>
+          <p className="mb-1 text-[10.5px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+            {today}
+          </p>
+          <h1 className="text-xl font-serif tracking-tight text-white md:text-2xl">
+            System{' '}
+            <span className="bg-gradient-to-r from-yellow-200 to-yellow-500 bg-clip-text text-transparent">
+              Audit Logs
+            </span>
+          </h1>
+          <p className="mt-0.5 text-[11.5px] text-zinc-500">
+            Immutable record of every action taken within the platform.
+          </p>
         </div>
-      </div>
 
-      <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden flex flex-col">
-        
-        {/* TOOLBAR */}
-        <div className="p-4 border-b border-zinc-800 flex flex-col sm:flex-row gap-3">
-          <div className="flex items-center gap-2 text-zinc-400 bg-zinc-950 border border-zinc-800 px-3 py-2.5 rounded-lg text-sm flex-1">
-            <Filter className="w-4 h-4 text-zinc-500" strokeWidth={1.5} />
-            <span className="text-zinc-500 font-medium">Filters:</span>
+        {/* FILTERS */}
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
+          <div className="flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-[10.5px] font-semibold uppercase tracking-wider text-zinc-500">
+            <Filter className="h-3 w-3" strokeWidth={2.2} />
+            Filters
           </div>
-          
-          <select 
-            value={actionFilter}
-            onChange={(e) => { setActionFilter(e.target.value); setPage(1); }}
-            className="bg-zinc-950 border border-zinc-800 text-white text-sm rounded-lg px-3 py-2.5 focus:border-yellow-500/50 focus:outline-none sm:w-40 appearance-none"
-          >
-            <option value="">All Actions</option>
-            <option value="create">Create</option>
-            <option value="update">Update</option>
-            <option value="delete">Delete</option>
-            <option value="login">Login</option>
-            <option value="publish">Publish</option>
-            <option value="appoint">Appoint</option>
-            <option value="promote">Promote</option>
-            <option value="ai_parse">AI Parse</option>
-          </select>
-
-          <select 
-            value={resourceFilter}
-            onChange={(e) => { setResourceFilter(e.target.value); setPage(1); }}
-            className="bg-zinc-950 border border-zinc-800 text-white text-sm rounded-lg px-3 py-2.5 focus:border-yellow-500/50 focus:outline-none sm:w-40 appearance-none"
-          >
-            <option value="">All Resources</option>
-            <option value="user">User</option>
-            <option value="course">Course</option>
-            <option value="result">Result</option>
-            <option value="calendar">Calendar</option>
-            <option value="department">Department</option>
-            <option value="result_upload">Result Upload</option>
-          </select>
+          <div className="grid grid-cols-2 gap-2 sm:flex-1 sm:max-w-md">
+            <CompactSelect 
+              options={actionOptions}
+              value={actionFilter}
+              onChange={(val) => { setActionFilter(val); setPage(1); }}
+              placeholder="All Actions"
+            />
+            <CompactSelect 
+              options={resourceOptions}
+              value={resourceFilter}
+              onChange={(val) => { setResourceFilter(val); setPage(1); }}
+              placeholder="All Resources"
+            />
+          </div>
         </div>
 
         {/* LOGS LIST */}
-        <div className="flex-1">
-          {isLoading ? (
-            <div className="p-4 space-y-4">
-              {[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-16 w-full" />)}
-            </div>
-          ) : logs.length === 0 ? (
-            <div className="p-12 text-center flex flex-col items-center justify-center">
-              <Activity className="w-12 h-12 text-zinc-700 mb-4" strokeWidth={1} />
-              <h3 className="text-lg font-medium text-white mb-1">No activity found</h3>
-              <p className="text-zinc-500 text-sm">There are no logs matching your current filters.</p>
-            </div>
-          ) : (
-            <div className="divide-y divide-zinc-800/50">
-              {logs.map((log) => (
-                <div key={log._id} className="p-4 hover:bg-zinc-800/20 transition-colors flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  
-                  {/* Left Side: Actor & Action */}
-                  <div className="flex items-start gap-4 flex-1">
-                    <div className="w-10 h-10 rounded-full bg-zinc-800 border border-zinc-700 flex items-center justify-center shrink-0 mt-0.5">
-                      <User className="w-4 h-4 text-zinc-400" strokeWidth={1.5} />
-                    </div>
-                    
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2 mb-1">
-                        <span className="font-semibold text-white text-sm">{log.actor?.name || 'System Admin'}</span>
-                        <span className="text-[10px] font-bold uppercase tracking-wider text-zinc-500 bg-zinc-900 px-1.5 py-0.5 rounded border border-zinc-800">
-                          {log.actorRole || log.actor?.role || 'admin'}
-                        </span>
-                      </div>
-                      
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider border ${getActionColor(log.action)}`}>
-                          {log.action}
-                        </span>
-                        <span className="text-sm text-zinc-300">
-                          <span className="text-zinc-500 lowercase">on</span> <span className="font-mono text-yellow-500">{log.resource}</span>
-                        </span>
-                      </div>
-                    </div>
+        {isLoading ? (
+          <div className="space-y-2.5">
+            {[1, 2, 3, 4, 5].map(i => <Skeleton key={i} className="h-20 w-full" />)}
+          </div>
+        ) : logs.length === 0 ? (
+          <div className="rounded-xl border border-dashed border-zinc-800 p-8 text-center">
+            <Database className="mx-auto mb-2 h-8 w-8 text-zinc-700" strokeWidth={1.5} />
+            <h3 className="text-[13px] font-semibold text-white">
+              {hasActiveFilter ? 'No matching logs' : 'No activity yet'}
+            </h3>
+            <p className="mt-0.5 text-[11px] text-zinc-500">
+              {hasActiveFilter 
+                ? 'Try adjusting or clearing your filters.' 
+                : 'Actions taken on the platform will appear here.'}
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-hidden rounded-xl border border-zinc-800 bg-zinc-900 divide-y divide-zinc-800/60">
+            {logs.map((log) => {
+              const metaStr = formatMeta(log.meta);
+              const actorName = log.actor?.name || 'System Admin';
+              const actorRole = log.actorRole || log.actor?.role || 'admin';
+
+              return (
+                <div 
+                  key={log._id} 
+                  className="flex items-start gap-2.5 px-3 py-2.5 transition-colors hover:bg-zinc-800/30"
+                >
+                  {/* AVATAR */}
+                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-zinc-700 bg-zinc-800 text-[10px] font-bold text-yellow-500">
+                    {getInitials(actorName)}
                   </div>
 
-                  {/* Middle: Meta data (Desktop only to save space) */}
-                  <div className="hidden md:flex flex-1 flex-col items-start px-4">
-                    <span className="text-[10px] text-zinc-600 uppercase tracking-wider mb-1">Details</span>
-                    <p className="text-xs text-zinc-400 truncate max-w-xs">
-                      {formatMeta(log.meta)}
-                    </p>
-                  </div>
-
-                  {/* Right Side: Date & IP */}
-                  <div className="flex md:flex-col items-center md:items-end justify-between md:justify-center gap-2 shrink-0 md:w-48 text-right">
-                    <div>
-                      <p className="text-xs font-medium text-zinc-300">
-                        {new Date(log.createdAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-                      </p>
-                      <p className="text-[10px] text-zinc-500">
-                        {new Date(log.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </p>
+                  {/* BODY */}
+                  <div className="min-w-0 flex-1">
+                    {/* Name + role */}
+                    <div className="flex items-center gap-1.5">
+                      <span className="truncate text-[12.5px] font-medium text-white">
+                        {actorName}
+                      </span>
+                      <span className="shrink-0 rounded border border-zinc-800 bg-zinc-950 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-zinc-500">
+                        {actorRole}
+                      </span>
                     </div>
-                    {log.ip && (
-                      <p className="text-[10px] font-mono text-zinc-600 bg-zinc-950 px-1.5 py-0.5 rounded hidden md:block">
-                        IP: {log.ip}
+
+                    {/* Action + resource */}
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      <span className={`inline-flex items-center rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${getActionColor(log.action)}`}>
+                        {log.action}
+                      </span>
+                      <span className="text-[10.5px] text-zinc-500">
+                        on <span className="font-mono text-yellow-500">{log.resource}</span>
+                      </span>
+                    </div>
+
+                    {/* Meta details */}
+                    {metaStr && (
+                      <p className="mt-1 truncate text-[10px] text-zinc-500">
+                        {metaStr}
                       </p>
                     )}
                   </div>
 
+                  {/* TIME */}
+                  <div className="shrink-0 text-right">
+                    <p className="text-[10.5px] font-medium text-zinc-400">
+                      {formatDate(log.createdAt)}
+                    </p>
+                    <p className="mt-0.5 text-[9.5px] text-zinc-600">
+                      {formatTime(log.createdAt)}
+                    </p>
+                  </div>
                 </div>
-              ))}
-            </div>
-          )}
-        </div>
+              );
+            })}
+          </div>
+        )}
 
         {/* PAGINATION */}
-        <div className="p-4 border-t border-zinc-800 flex items-center justify-between text-xs text-zinc-400 mt-auto">
-          <span>Showing <strong className="text-white">{logs.length}</strong> of {totalLogs} logs</span>
-          <div className="flex items-center gap-2">
-            <button 
-              onClick={() => setPage(p => Math.max(1, p - 1))}
-              disabled={page === 1}
-              className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <ChevronLeft className="w-4 h-4" />
-            </button>
-            <span className="font-medium text-white">Page {page} of {totalPages}</span>
-            <button 
-              onClick={() => setPage(p => Math.min(totalPages, p + 1))}
-              disabled={page === totalPages}
-              className="p-1.5 rounded bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-            >
-              <ChevronRight className="w-4 h-4" />
-            </button>
+        {!isLoading && totalLogs > 0 && (
+          <div className="flex flex-col items-center justify-between gap-2 rounded-xl border border-zinc-800 bg-zinc-900 px-3 py-2.5 sm:flex-row">
+            <span className="text-[10.5px] text-zinc-500">
+              Showing <strong className="text-white">{logs.length}</strong> of {totalLogs} logs
+            </span>
+            <div className="flex items-center gap-2">
+              <button 
+                onClick={() => setPage(p => Math.max(1, p - 1))}
+                disabled={page === 1}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-800 bg-zinc-950 text-zinc-400 transition-colors hover:border-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ChevronLeft className="h-3.5 w-3.5" strokeWidth={2.2} />
+              </button>
+              <span className="min-w-[80px] text-center text-[10.5px] font-semibold uppercase tracking-wider text-zinc-300">
+                {page} / {totalPages}
+              </span>
+              <button 
+                onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+                disabled={page === totalPages}
+                className="flex h-7 w-7 items-center justify-center rounded-md border border-zinc-800 bg-zinc-950 text-zinc-400 transition-colors hover:border-zinc-700 hover:text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                <ChevronRight className="h-3.5 w-3.5" strokeWidth={2.2} />
+              </button>
+            </div>
           </div>
-        </div>
+        )}
 
       </div>
     </div>
