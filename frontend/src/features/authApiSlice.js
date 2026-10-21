@@ -44,6 +44,16 @@ export const authApiSlice = apiSlice.injectEndpoints({
       invalidatesTags: ["User"],
     }),
 
+    // Public list of departments (used by signup)
+    getDepartments: builder.query({
+      query: () => ({
+        url: `${AUTH_URL}/departments`,
+        method: "GET",
+      }),
+      // Cache for the session — departments rarely change
+      keepUnusedDataFor: 300,
+    }),
+
     /* ============================================
        PROTECTED
        ============================================ */
@@ -107,13 +117,18 @@ export const {
   useLoginMutation,
   useResendOtpMutation,
   useVerifyOtpMutation,
+  useGetDepartmentsQuery,      // 👈 new
+  useLazyGetDepartmentsQuery,  // 👈 new (lazy variant)
+
   // Protected
   useGetMeQuery,
   useLazyGetMeQuery,
   useLogoutMutation,
+
   // Profile picture
   useUpdateProfilePictureMutation,
   useDeleteProfilePictureMutation,
+
   // Account
   useDeleteAccountMutation,
 } = authApiSlice;

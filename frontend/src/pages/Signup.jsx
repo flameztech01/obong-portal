@@ -4,47 +4,96 @@ import { useDispatch } from 'react-redux';
 import { 
   useSignupMutation, 
   useVerifyOtpMutation, 
-  useResendOtpMutation 
+  useResendOtpMutation,
+  useGetDepartmentsQuery,
 } from '../features/authApiSlice';
-import { setCredentials } from '../features/auth/authSlice'; // adjust path if needed
+import { setCredentials } from '../features/auth/authSlice';
 import { useToast } from '../components/Toast';
 
 /* =========================================
-   CUSTOM DROPDOWN COMPONENT
+   CUSTOM DROPDOWN (optionally searchable)
    ========================================= */
-const CustomSelect = ({ label, options, value, onChange, placeholder }) => {
+const CustomSelect = ({ 
+  label, 
+  options, 
+  value, 
+  onChange, 
+  placeholder, 
+  disabled = false, 
+  searchable = false,
+}) => {
   const [isOpen, setIsOpen] = useState(false);
+  const [query, setQuery] = useState('');
   const dropdownRef = useRef(null);
+  const searchRef = useRef(null);
 
+  // Close on outside click
   useEffect(() => {
     const handleClickOutside = (event) => {
       if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
         setIsOpen(false);
+        setQuery('');
       }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  // Auto-focus the search input when the dropdown opens
+  useEffect(() => {
+    if (isOpen && searchable) {
+      const t = setTimeout(() => searchRef.current?.focus(), 0);
+      return () => clearTimeout(t);
+    }
+  }, [isOpen, searchable]);
+
   const selectedOption = options.find((opt) => opt.value === value);
+
+  const filteredOptions =
+    searchable && query.trim()
+      ? options.filter((o) =>
+          o.label.toLowerCase().includes(query.trim().toLowerCase())
+        )
+      : options;
+
+  const handleToggle = () => {
+    if (disabled) return;
+    if (isOpen) {
+      setIsOpen(false);
+      setQuery('');
+    } else {
+      setIsOpen(true);
+    }
+  };
+
+  const handleSelect = (optionValue) => {
+    onChange(optionValue);
+    setIsOpen(false);
+    setQuery('');
+  };
 
   return (
     <div className="space-y-1.5 relative" ref={dropdownRef}>
-      <label className="text-xs font-medium text-zinc-300 uppercase tracking-wider">
-        {label}
-      </label>
+      {label && (
+        <label className="text-xs font-medium text-zinc-300 uppercase tracking-wider">
+          {label}
+        </label>
+      )}
       <button
         type="button"
-        onClick={() => setIsOpen(!isOpen)}
+        disabled={disabled}
+        onClick={handleToggle}
         className={`w-full flex items-center justify-between bg-zinc-900 border ${
           isOpen ? 'border-yellow-500/50 ring-1 ring-yellow-500/50' : 'border-zinc-800'
-        } text-zinc-100 text-sm rounded-lg px-4 py-3 transition-all`}
+        } text-zinc-100 text-sm rounded-lg px-4 py-3 transition-all ${
+          disabled ? 'opacity-60 cursor-not-allowed' : ''
+        }`}
       >
-        <span className={!selectedOption ? 'text-zinc-600' : ''}>
+        <span className={`truncate text-left ${!selectedOption ? 'text-zinc-600' : ''}`}>
           {selectedOption ? selectedOption.label : placeholder}
         </span>
         <svg
-          className={`w-4 h-4 text-zinc-400 transition-transform duration-200 ${
+          className={`w-4 h-4 text-zinc-400 shrink-0 transition-transform duration-200 ${
             isOpen ? 'rotate-180' : ''
           }`}
           fill="none"
@@ -55,23 +104,66 @@ const CustomSelect = ({ label, options, value, onChange, placeholder }) => {
         </svg>
       </button>
 
-      {isOpen && (
+      {isOpen && !disabled && (
         <div className="absolute z-50 w-full mt-1 bg-zinc-900 border border-zinc-700 rounded-lg shadow-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200">
+          {searchable && (
+            <div className="p-2 border-b border-zinc-800">
+              <div className="relative">
+                <svg
+                  className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-500"
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
+                </svg>
+                <input
+                  ref={searchRef}
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Type to search..."
+                  className="w-full bg-zinc-950 border border-zinc-800 text-zinc-100 text-sm rounded-md pl-8 pr-3 py-2 focus:outline-none focus:border-yellow-500/50 focus:ring-1 focus:ring-yellow-500/50 transition-all placeholder:text-zinc-600"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Escape') {
+                      setIsOpen(false);
+                      setQuery('');
+                    }
+                    if (e.key === 'Enter' && filteredOptions.length > 0) {
+                      e.preventDefault();
+                      handleSelect(filteredOptions[0].value);
+                    }
+                  }}
+                />
+              </div>
+            </div>
+          )}
+
           <ul className="max-h-60 overflow-y-auto py-1 text-sm text-zinc-200 custom-scrollbar">
-            {options.map((option) => (
-              <li
-                key={option.value}
-                onClick={() => {
-                  onChange(option.value);
-                  setIsOpen(false);
-                }}
-                className={`px-4 py-2.5 cursor-pointer hover:bg-zinc-800 transition-colors ${
-                  value === option.value ? 'bg-zinc-800/50 text-yellow-500 font-medium' : ''
-                }`}
-              >
-                {option.label}
+            {filteredOptions.length === 0 ? (
+              <li className="px-4 py-3 text-zinc-500 text-xs italic">
+                No matches found
               </li>
-            ))}
+            ) : (
+              filteredOptions.map((option) => (
+                <li
+                  key={option.value}
+                  onClick={() => handleSelect(option.value)}
+                  className={`px-4 py-2.5 cursor-pointer hover:bg-zinc-800 transition-colors ${
+                    value === option.value
+                      ? 'bg-zinc-800/50 text-yellow-500 font-medium'
+                      : ''
+                  }`}
+                >
+                  {option.label}
+                </li>
+              ))
+            )}
           </ul>
         </div>
       )}
@@ -92,10 +184,16 @@ const Signup = () => {
   const [verifyOtp, { isLoading: isVerifying }] = useVerifyOtpMutation();
   const [resendOtp, { isLoading: isResending }] = useResendOtpMutation();
 
+  // Real departments from backend
+  const { 
+    data: deptData, 
+    isLoading: isDeptLoading,
+    isError: isDeptError,
+  } = useGetDepartmentsQuery();
+
   // State
-  const [step, setStep] = useState('signup'); // 'signup' | 'otp'
+  const [step, setStep] = useState('signup');
   
-  // Signup State
   const [formData, setFormData] = useState({
     name: '',
     email: '',
@@ -106,18 +204,15 @@ const Signup = () => {
     isTransferStudent: false,
   });
 
-  // OTP State
   const [otpIdentifier, setOtpIdentifier] = useState('');
   const [otpArray, setOtpArray] = useState(['', '', '', '', '', '']);
   const otpRefs = useRef([]);
 
-  // Mock Data
-  const departments = [
-    { value: '65f1a2b3c4d5e6f7a8b9c0d1', label: 'Computer Science' },
-    { value: '65f1a2b3c4d5e6f7a8b9c0d2', label: 'Mass Communication' },
-    { value: '65f1a2b3c4d5e6f7a8b9c0d3', label: 'Accounting' },
-    { value: '65f1a2b3c4d5e6f7a8b9c0d4', label: 'Law' },
-  ];
+  // Build options from API response
+  const departments = (deptData?.departments || []).map((d) => ({
+    value: d._id,
+    label: d.name,
+  }));
 
   const levels = [
     { value: '100', label: '100 Level' },
@@ -140,6 +235,10 @@ const Signup = () => {
 
   const handleSignupSubmit = async (e) => {
     e.preventDefault();
+
+    if (!formData.department) {
+      return toast.error('Please select a department.');
+    }
 
     try {
       const result = await signup(formData).unwrap();
@@ -178,10 +277,7 @@ const Signup = () => {
 
     try {
       const result = await verifyOtp({ identifier: otpIdentifier, otp: otpCode }).unwrap();
-
-      // ✅ Store token inside userInfo — apiSlice reads state.auth.userInfo.token
       dispatch(setCredentials({ ...result.user, token: result.token }));
-
       toast.success("Email verified successfully!");
       
       if (result.nextStep === 'UPLOAD_HISTORICAL_RESULTS') {
@@ -341,12 +437,40 @@ const Signup = () => {
                       />
                     </div>
 
+                    {/* Department — searchable select */}
                     <div className="md:col-span-2">
-                      <CustomSelect label="Department" placeholder="Select Department" options={departments} value={formData.department} onChange={(val) => handleCustomChange('department', val)} />
+                      <CustomSelect 
+                        label="Department" 
+                        placeholder={
+                          isDeptLoading 
+                            ? 'Loading departments...' 
+                            : isDeptError 
+                              ? 'Failed to load departments' 
+                              : departments.length === 0 
+                                ? 'No departments available' 
+                                : 'Select Department'
+                        }
+                        options={departments} 
+                        value={formData.department} 
+                        onChange={(val) => handleCustomChange('department', val)}
+                        disabled={isDeptLoading || isDeptError || departments.length === 0}
+                        searchable
+                      />
+                      {isDeptError && (
+                        <p className="text-[11px] text-red-400 mt-1">
+                          Couldn't load departments. Please refresh the page.
+                        </p>
+                      )}
                     </div>
 
                     <div className="md:col-span-2">
-                      <CustomSelect label="Current Level" placeholder="Select Level" options={levels} value={formData.level} onChange={(val) => handleCustomChange('level', val)} />
+                      <CustomSelect 
+                        label="Current Level" 
+                        placeholder="Select Level" 
+                        options={levels} 
+                        value={formData.level} 
+                        onChange={(val) => handleCustomChange('level', val)} 
+                      />
                     </div>
 
                     {/* MODERN TRANSFER STUDENT TOGGLE */}
@@ -379,7 +503,6 @@ const Signup = () => {
                           </div>
                         </div>
 
-                        {/* Custom Toggle Switch */}
                         <div
                           className={`relative inline-flex h-6 w-11 flex-shrink-0 items-center rounded-full transition-colors duration-300 ${
                             formData.isTransferStudent ? 'bg-yellow-500' : 'bg-zinc-700'
@@ -397,7 +520,8 @@ const Signup = () => {
 
                   <div className="pt-2">
                     <button 
-                      type="submit" disabled={isSigningUp}
+                      type="submit" 
+                      disabled={isSigningUp || isDeptLoading || isDeptError}
                       className="w-full flex justify-center items-center py-4 px-4 bg-zinc-100 hover:bg-white text-zinc-950 text-sm font-bold tracking-widest uppercase transition-all duration-300 disabled:opacity-70 rounded-lg"
                     >
                       {isSigningUp ? 'Processing...' : 'Create Account'}

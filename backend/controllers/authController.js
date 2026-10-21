@@ -461,3 +461,20 @@ export const deleteAccount = async (req, res) => {
     return res.status(500).json({ message: "Server error" });
   }
 };
+
+/* ============================================================
+   PUBLIC DEPARTMENTS  (used by signup)
+   ============================================================ */
+export const getPublicDepartments = async (_req, res) => {
+  try {
+    const departments = await Department.find()
+      .select("name code")
+      .sort({ name: 1 })
+      .lean();
+
+    return res.json({ departments });
+  } catch (err) {
+    console.error("getPublicDepartments error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
+};

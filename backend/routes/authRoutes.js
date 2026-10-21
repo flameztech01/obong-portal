@@ -2,7 +2,7 @@
 import express from "express";
 import {
   signup, login, resendOtp, verifyOtp, logout, getMe,
-  updateProfilePicture, deleteProfilePicture, deleteAccount
+  updateProfilePicture, deleteProfilePicture, deleteAccount, getPublicDepartments,
 } from "../controllers/authController.js";
 import { protect } from "../middleware/authMiddleware.js";
 import multer from "multer";
@@ -19,6 +19,7 @@ cloudinary.config({
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024 } });
 
 router.post("/signup", signup);
+router.get("/departments", getPublicDepartments);
 router.post("/login", login);
 router.post("/resend-otp", resendOtp);
 router.post("/verify-otp", verifyOtp);
