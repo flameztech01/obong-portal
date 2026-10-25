@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
   Ghost, Send, ImagePlus, X, Loader2, AlertTriangle,
-  CheckCircle2, MessageSquare,
+  CheckCircle2, MessageSquare, ShieldCheck, Sparkles
 } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import {
@@ -37,7 +37,7 @@ const DropAnonymous = () => {
 
   /* ---- auto-focus textarea once the link resolves ---- */
   useEffect(() => {
-    if (!isLoading && info && textareaRef.current) {
+    if (!isLoading && info && textareaRef.current && window.innerWidth > 768) {
       textareaRef.current.focus();
     }
   }, [isLoading, info]);
@@ -62,7 +62,7 @@ const DropAnonymous = () => {
   /* ---- image selection ---- */
   const handleFilesSelected = (e) => {
     const picked = Array.from(e.target.files || []);
-    e.target.value = ''; // allow re-selecting the same file later
+    e.target.value = '';
     if (picked.length === 0) return;
 
     const remaining = MAX_IMAGES - images.length;
@@ -153,14 +153,14 @@ const DropAnonymous = () => {
      ========================================= */
   if (isLoading) {
     return (
-      <div className="-mx-4 min-h-screen bg-zinc-950 px-4 pb-8 pt-6 md:mx-0 md:flex md:items-center md:justify-center md:bg-transparent md:px-0 md:pb-0 md:pt-0">
-        <div className="mx-auto w-full max-w-md animate-pulse space-y-4">
-          <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6">
-            <div className="mx-auto mb-3 h-16 w-16 rounded-full bg-zinc-800" />
-            <div className="mx-auto h-3 w-32 rounded bg-zinc-800" />
-            <div className="mx-auto mt-2 h-5 w-40 rounded bg-zinc-800" />
+      <div className="min-h-screen bg-zinc-950 flex flex-col justify-center px-4 md:px-12">
+        <div className="mx-auto w-full max-w-5xl grid md:grid-cols-2 gap-12 items-center animate-pulse">
+          <div className="space-y-4 hidden md:block">
+            <div className="h-16 w-16 rounded-full bg-zinc-900" />
+            <div className="h-10 w-3/4 rounded bg-zinc-900" />
+            <div className="h-4 w-1/2 rounded bg-zinc-900" />
           </div>
-          <div className="h-40 w-full rounded-2xl bg-zinc-900" />
+          <div className="h-[400px] rounded-3xl bg-zinc-900" />
         </div>
       </div>
     );
@@ -171,15 +171,14 @@ const DropAnonymous = () => {
      ========================================= */
   if (isError || !info) {
     return (
-      <div className="-mx-4 flex min-h-screen items-center justify-center bg-zinc-950 px-4 md:mx-0 md:bg-transparent md:px-0">
-        <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-8 text-center">
-          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full border border-red-500/20 bg-red-500/5 text-red-400">
-            <AlertTriangle className="h-7 w-7" strokeWidth={1.8} />
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+        <div className="w-full max-w-sm rounded-3xl border border-zinc-800/80 bg-zinc-900/50 p-8 text-center backdrop-blur-xl">
+          <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-red-500/20 bg-red-500/10 text-red-400">
+            <AlertTriangle className="h-8 w-8" strokeWidth={1.8} />
           </div>
-          <h1 className="text-lg font-serif text-white">Link unavailable</h1>
-          <p className="mt-1.5 text-[12px] leading-relaxed text-zinc-500">
-            This link is invalid or no longer accepting messages. Ask the
-            person who sent it to share a fresh one.
+          <h1 className="text-xl font-serif text-white">Link unavailable</h1>
+          <p className="mt-2 text-[13px] leading-relaxed text-zinc-500">
+            This link is invalid, disabled, or no longer accepting messages.
           </p>
         </div>
       </div>
@@ -191,26 +190,24 @@ const DropAnonymous = () => {
      ========================================= */
   if (sent) {
     return (
-      <div className="-mx-4 flex min-h-screen items-center justify-center bg-zinc-950 px-4 md:mx-0 md:bg-transparent md:px-0">
-        <div className="w-full max-w-sm rounded-2xl border border-zinc-800 bg-zinc-900 p-8 text-center animate-in fade-in zoom-in-95 duration-300">
-          <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-yellow-500/10 ring-4 ring-yellow-500/5">
-            <CheckCircle2
-              className="h-8 w-8 text-yellow-500"
-              strokeWidth={2}
-            />
+      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4 relative overflow-hidden">
+        {/* Background flourish */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-yellow-500/5 blur-[120px] rounded-full pointer-events-none" />
+        
+        <div className="relative w-full max-w-md rounded-3xl border border-zinc-800/80 bg-zinc-900/60 p-10 text-center backdrop-blur-2xl animate-in fade-in zoom-in-95 duration-500 shadow-2xl">
+          <div className="mx-auto mb-6 flex h-20 w-20 items-center justify-center rounded-full bg-yellow-500/10 ring-8 ring-yellow-500/5">
+            <CheckCircle2 className="h-10 w-10 text-yellow-500" strokeWidth={2} />
           </div>
-          <h1 className="text-xl font-serif text-white">Message sent</h1>
-          <p className="mt-1.5 text-[12px] leading-relaxed text-zinc-500">
-            Your message was delivered to{' '}
-            <span className="text-zinc-300">{info.owner.name}</span>{' '}
-            anonymously.
+          <h1 className="text-2xl font-serif text-white tracking-tight">Message sent</h1>
+          <p className="mt-3 text-[13px] leading-relaxed text-zinc-400">
+            Your message has been delivered safely and completely anonymously.
           </p>
           <button
             type="button"
             onClick={() => setSent(false)}
-            className="mt-6 inline-flex items-center gap-1.5 rounded-md border border-zinc-800 bg-zinc-950 px-4 py-2 text-[11px] font-bold uppercase tracking-wider text-zinc-300 transition-colors hover:border-zinc-700 hover:text-white"
+            className="mt-8 inline-flex items-center justify-center gap-2 rounded-xl bg-zinc-800/50 px-6 py-3 text-[12px] font-bold uppercase tracking-wider text-zinc-300 transition-colors hover:bg-zinc-800 hover:text-white"
           >
-            <MessageSquare className="h-3.5 w-3.5" strokeWidth={2.2} />
+            <MessageSquare className="h-4 w-4" strokeWidth={2.2} />
             Send another
           </button>
         </div>
@@ -219,175 +216,201 @@ const DropAnonymous = () => {
   }
 
   /* =========================================
-     FORM
+     MAIN FORM
      ========================================= */
-  const initial = info.owner.name?.charAt(0)?.toUpperCase() || '?';
   const charsLeft = MAX_CONTENT - text.length;
   const imagesLeft = MAX_IMAGES - images.length;
 
   return (
-    <div className="-mx-4 min-h-screen bg-zinc-950 px-4 pb-8 pt-6 md:mx-0 md:flex md:items-center md:justify-center md:bg-transparent md:px-0 md:pb-0 md:pt-0">
-      <div className="mx-auto w-full max-w-md space-y-4 animate-in fade-in duration-500">
-
-        {/* =========================================
-            OWNER HEADER
-            ========================================= */}
-        <div className="rounded-2xl border border-zinc-800 bg-zinc-900 p-6 text-center">
-          <div className="relative mx-auto mb-3 inline-block">
-            <div className="flex h-16 w-16 items-center justify-center overflow-hidden rounded-full border border-zinc-700 bg-zinc-800 ring-4 ring-yellow-500/10">
-              {info.owner.profilePicture ? (
-                <img
-                  src={info.owner.profilePicture}
-                  alt={info.owner.name}
-                  className="h-full w-full object-cover"
-                />
-              ) : (
-                <span className="text-2xl font-bold text-yellow-500">
-                  {initial}
-                </span>
-              )}
-            </div>
-            <span className="absolute -bottom-0.5 -right-0.5 flex h-6 w-6 items-center justify-center rounded-full bg-yellow-500 text-zinc-950 ring-4 ring-zinc-900">
-              <Ghost className="h-3 w-3" strokeWidth={2.4} />
-            </span>
-          </div>
-
-          <p className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-zinc-500">
-            Send a message to
-          </p>
-          <h1 className="mt-1 truncate text-xl font-serif tracking-tight text-white md:text-2xl">
-            {info.owner.name}
-          </h1>
-          <p className="mt-1 text-[11px] text-zinc-500">
-            Your message will be sent anonymously
-          </p>
-        </div>
-
-        {/* =========================================
-            FORM CARD
-            ========================================= */}
-        <form
-          onSubmit={handleSubmit}
-          className="rounded-2xl border border-zinc-800 bg-zinc-900 p-4 md:p-5"
-        >
-          {/* textarea */}
-          <div className="relative">
-            <label htmlFor="drop-content" className="sr-only">
-              Your message
-            </label>
-            <textarea
-              id="drop-content"
-              ref={textareaRef}
-              value={text}
-              onChange={(e) => setText(e.target.value)}
-              maxLength={MAX_CONTENT}
-              rows={4}
-              placeholder="Say anything…"
-              className="w-full resize-none rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2.5 text-[13px] leading-relaxed text-white outline-none transition-colors placeholder:text-zinc-600 focus:border-yellow-500/50 focus:ring-1 focus:ring-yellow-500/30 custom-scrollbar"
-            />
-            <div className="pointer-events-none absolute bottom-2 right-3 flex items-center gap-1.5">
-              <span
-                className={`text-[10px] font-mono tabular-nums ${
-                  charsLeft < 100 ? 'text-yellow-500' : 'text-zinc-600'
-                }`}
-              >
-                {text.length}/{MAX_CONTENT}
-              </span>
-            </div>
-          </div>
-
-          {/* image attachments */}
-          {info.acceptsImages && (
-            <div className="mt-3">
-              <div className="mb-2 flex items-center justify-between">
-                <span className="text-[9.5px] font-bold uppercase tracking-[0.14em] text-zinc-500">
-                  Photos {images.length > 0 && `(${images.length}/${MAX_IMAGES})`}
-                </span>
-                {imagesLeft > 0 && (
-                  <span className="text-[10px] text-zinc-600">
-                    {imagesLeft} more allowed
-                  </span>
-                )}
-              </div>
-
-              <div className="flex flex-wrap gap-2">
-                {images.map((img, i) => (
-                  <div
-                    key={i}
-                    className="group relative h-20 w-20 overflow-hidden rounded-lg border border-zinc-800 bg-zinc-950 animate-in fade-in"
-                  >
-                    <img
-                      src={img.preview}
-                      alt={`Attachment ${i + 1}`}
-                      className="h-full w-full object-cover"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => removeImage(i)}
-                      aria-label="Remove image"
-                      className="absolute right-1 top-1 rounded-full bg-black/70 p-1 text-white/90 transition-colors hover:bg-red-500/90"
-                    >
-                      <X className="h-3 w-3" strokeWidth={2.6} />
-                    </button>
-                  </div>
-                ))}
-
-                {imagesLeft > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    className="flex h-20 w-20 flex-col items-center justify-center gap-1 rounded-lg border border-dashed border-zinc-700 text-zinc-500 transition-colors hover:border-yellow-500/40 hover:text-yellow-500"
-                  >
-                    <ImagePlus className="h-4 w-4" strokeWidth={2} />
-                    <span className="text-[9px] font-bold uppercase tracking-wider">
-                      Add
-                    </span>
-                  </button>
-                )}
-              </div>
-
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept="image/*"
-                multiple
-                onChange={handleFilesSelected}
-                className="hidden"
-              />
-            </div>
-          )}
-
-          {/* submit */}
-          <button
-            type="submit"
-            disabled={
-              isSubmitting ||
-              (!text.trim() && images.length === 0)
-            }
-            className="mt-4 flex w-full items-center justify-center gap-1.5 rounded-md bg-yellow-500 py-2.5 text-[12px] font-bold uppercase tracking-wider text-zinc-950 transition-colors hover:bg-yellow-400 disabled:cursor-not-allowed disabled:opacity-40 active:scale-[0.99]"
-          >
-            {isSubmitting ? (
-              <>
-                <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                Sending…
-              </>
-            ) : (
-              <>
-                <Send className="h-3.5 w-3.5" strokeWidth={2.4} />
-                Send message
-              </>
-            )}
-          </button>
-        </form>
-
-        {/* =========================================
-            ANONYMITY NOTE
-            ========================================= */}
-        <p className="px-2 text-center text-[10.5px] leading-relaxed text-zinc-600">
-          Your name is never shown to {info.owner.name?.split(' ')[0] || 'the receiver'}.
-          If you're signed in, they'll see that you're a member — but not who.
-        </p>
+    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col relative overflow-hidden">
+      {/* Ambient Background Glows */}
+      <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
+        <div className="absolute -top-[20%] -left-[10%] w-[50%] h-[50%] bg-yellow-500/5 blur-[120px] rounded-full" />
+        <div className="absolute bottom-[0%] right-[0%] w-[40%] h-[40%] bg-blue-500/5 blur-[120px] rounded-full" />
       </div>
+
+      <div className="relative flex-1 flex items-center justify-center p-4 md:p-8">
+        <div className="w-full max-w-5xl grid md:grid-cols-2 gap-10 md:gap-20 items-center">
+          
+          {/* =========================================
+              LEFT: BRANDING & WRITE-UP (Desktop only)
+              ========================================= */}
+          <div className="hidden md:flex flex-col items-start space-y-6 animate-in fade-in slide-in-from-left-8 duration-700">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-900 border border-zinc-800 shadow-xl shadow-black/50">
+              <Ghost className="h-7 w-7 text-yellow-500" strokeWidth={2} />
+            </div>
+            
+            <div>
+              <h1 className="text-4xl lg:text-5xl font-serif text-white leading-[1.15] tracking-tight">
+                Drop a message.<br />
+                <span className="text-zinc-500">Stay a mystery.</span>
+              </h1>
+              <p className="mt-4 text-[14px] leading-relaxed text-zinc-400 max-w-sm">
+                Say whatever is on your mind. No names, no tracking, no judgement. 
+                Just pure, unfiltered thoughts delivered straight to their inbox.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3 pt-4 border-t border-zinc-800/80 w-full max-w-sm">
+              <div className="flex h-8 w-8 items-center justify-center rounded-full bg-emerald-500/10">
+                <ShieldCheck className="h-4 w-4 text-emerald-400" strokeWidth={2.2} />
+              </div>
+              <p className="text-[11.5px] text-zinc-500 font-medium">
+                100% Anonymous. Your identity is protected.
+              </p>
+            </div>
+          </div>
+
+          {/* =========================================
+              RIGHT: FORM CARD
+              ========================================= */}
+          <div className="w-full relative animate-in fade-in slide-in-from-bottom-8 md:slide-in-from-right-8 duration-700 delay-150 fill-mode-both">
+            
+            {/* Mobile-only header */}
+            <div className="md:hidden text-center mb-6 space-y-2">
+              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-900 border border-zinc-800 mb-4 shadow-lg">
+                <Ghost className="h-6 w-6 text-yellow-500" strokeWidth={2} />
+              </div>
+              <h1 className="text-2xl font-serif text-white tracking-tight">Drop a message.</h1>
+              <p className="text-[12px] text-zinc-500">Completely anonymous.</p>
+            </div>
+
+            <form
+              onSubmit={handleSubmit}
+              className="rounded-[2rem] border border-zinc-800/80 bg-zinc-900/40 p-5 md:p-6 backdrop-blur-2xl shadow-2xl shadow-black/50 overflow-hidden relative"
+            >
+              {/* Subtle top highlight */}
+              <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+
+              {/* Textarea */}
+              <div className="relative">
+                <label htmlFor="drop-content" className="sr-only">Your message</label>
+                <textarea
+                  id="drop-content"
+                  ref={textareaRef}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  maxLength={MAX_CONTENT}
+                  rows={5}
+                  placeholder="Write your anonymous message here..."
+                  className="w-full resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-white outline-none placeholder:text-zinc-600 custom-scrollbar"
+                />
+                
+                {/* Character Count */}
+                <div className="flex justify-end mt-2">
+                  <span
+                    className={`text-[10px] font-mono tabular-nums tracking-wider px-2 py-1 rounded-md transition-colors ${
+                      charsLeft < 100 ? 'bg-yellow-500/10 text-yellow-500' : 'bg-zinc-900/50 text-zinc-600'
+                    }`}
+                  >
+                    {text.length} / {MAX_CONTENT}
+                  </span>
+                </div>
+              </div>
+
+              {/* Divider */}
+              <div className="h-px w-full bg-zinc-800/60 my-2" />
+
+              {/* Image Attachments */}
+              {info.acceptsImages && (
+                <div className="py-3">
+                  <div className="flex items-center justify-between mb-3 px-1">
+                    <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
+                      Attachments
+                    </span>
+                    <span className="text-[10px] text-zinc-600">
+                      Max {MAX_IMAGES} images
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2.5">
+                    {images.map((img, i) => (
+                      <div
+                        key={i}
+                        className="group relative h-[72px] w-[72px] overflow-hidden rounded-xl border border-zinc-700/50 bg-zinc-950 animate-in fade-in zoom-in-75"
+                      >
+                        <img
+                          src={img.preview}
+                          alt={`Attachment ${i + 1}`}
+                          className="h-full w-full object-cover opacity-90 transition-opacity group-hover:opacity-100"
+                        />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 transition-opacity group-hover:opacity-100" />
+                        <button
+                          type="button"
+                          onClick={() => removeImage(i)}
+                          aria-label="Remove image"
+                          className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-transform hover:bg-red-500 hover:scale-110"
+                        >
+                          <X className="h-3 w-3" strokeWidth={2.6} />
+                        </button>
+                      </div>
+                    ))}
+
+                    {imagesLeft > 0 && (
+                      <button
+                        type="button"
+                        onClick={() => fileInputRef.current?.click()}
+                        className="flex h-[72px] w-[72px] flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-zinc-700/80 bg-zinc-900/30 text-zinc-500 transition-all hover:border-yellow-500/50 hover:bg-yellow-500/5 hover:text-yellow-500"
+                      >
+                        <ImagePlus className="h-5 w-5" strokeWidth={1.8} />
+                        <span className="text-[9px] font-bold uppercase tracking-wider">
+                          Add
+                        </span>
+                      </button>
+                    )}
+                  </div>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    onChange={handleFilesSelected}
+                    className="hidden"
+                  />
+                </div>
+              )}
+
+              {/* Submit Button */}
+              <div className="mt-4 pt-2">
+                <button
+                  type="submit"
+                  disabled={isSubmitting || (!text.trim() && images.length === 0)}
+                  className="group relative flex w-full items-center justify-center gap-2 rounded-xl bg-yellow-500 py-3.5 text-[12px] font-bold uppercase tracking-widest text-zinc-950 transition-all hover:bg-yellow-400 disabled:cursor-not-allowed disabled:opacity-40 overflow-hidden active:scale-[0.98]"
+                >
+                  {isSubmitting ? (
+                    <>
+                      <Loader2 className="h-4 w-4 animate-spin" strokeWidth={2.5} />
+                      Sending...
+                    </>
+                  ) : (
+                    <>
+                      <Send className="h-4 w-4 transition-transform group-hover:translate-x-1 group-hover:-translate-y-1" strokeWidth={2.4} />
+                      Send Anonymously
+                    </>
+                  )}
+                  {/* Shimmer effect */}
+                  <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent group-hover:animate-shimmer" />
+                </button>
+              </div>
+            </form>
+            
+            {/* Mobile Disclaimer */}
+            <p className="md:hidden mt-6 text-center text-[10.5px] leading-relaxed text-zinc-500/80 px-4">
+              Your identity is hidden. They will not know who sent this.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Tailwind custom keyframes for the shimmer effect */}
+      <style dangerouslySetInnerHTML={{__html: `
+        @keyframes shimmer {
+          100% { transform: translateX(100%); }
+        }
+        .group-hover\\:animate-shimmer {
+          animation: shimmer 1.2s infinite;
+        }
+      `}} />
     </div>
   );
 };
