@@ -3,7 +3,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { useParams } from 'react-router';
 import {
   Ghost, Send, ImagePlus, X, Loader2, AlertTriangle,
-  CheckCircle2, MessageSquare, ShieldCheck, Sparkles
+  CheckCircle2, MessageSquare, ShieldCheck
 } from 'lucide-react';
 import { useToast } from '../components/Toast';
 import {
@@ -28,7 +28,7 @@ const DropAnonymous = () => {
   const [submit, { isLoading: isSubmitting }] = useSubmitPostMutation();
 
   const [text, setText] = useState('');
-  const [images, setImages] = useState([]); // [{ file, preview }]
+  const [images, setImages] = useState([]);
   const [sent, setSent] = useState(false);
 
   const fileInputRef = useRef(null);
@@ -41,14 +41,6 @@ const DropAnonymous = () => {
       textareaRef.current.focus();
     }
   }, [isLoading, info]);
-
-  /* ---- auto-resize the textarea with content ---- */
-  useEffect(() => {
-    const el = textareaRef.current;
-    if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = `${Math.min(el.scrollHeight, 240)}px`;
-  }, [text]);
 
   /* ---- clean up every object URL when the page unmounts ---- */
   useEffect(() => {
@@ -130,10 +122,6 @@ const DropAnonymous = () => {
       toast.error('Write a message or attach an image');
       return;
     }
-    if (trimmed.length > MAX_CONTENT) {
-      toast.error(`Message is too long (max ${MAX_CONTENT} chars)`);
-      return;
-    }
 
     try {
       const fd = new FormData();
@@ -153,7 +141,7 @@ const DropAnonymous = () => {
      ========================================= */
   if (isLoading) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex flex-col justify-center px-4 md:px-12">
+      <div className="h-[100dvh] bg-zinc-950 flex flex-col justify-center px-4 md:px-12 overflow-hidden">
         <div className="mx-auto w-full max-w-5xl grid md:grid-cols-2 gap-12 items-center animate-pulse">
           <div className="space-y-4 hidden md:block">
             <div className="h-16 w-16 rounded-full bg-zinc-900" />
@@ -171,7 +159,7 @@ const DropAnonymous = () => {
      ========================================= */
   if (isError || !info) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4">
+      <div className="h-[100dvh] bg-zinc-950 flex items-center justify-center p-4 overflow-hidden">
         <div className="w-full max-w-sm rounded-3xl border border-zinc-800/80 bg-zinc-900/50 p-8 text-center backdrop-blur-xl">
           <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-red-500/20 bg-red-500/10 text-red-400">
             <AlertTriangle className="h-8 w-8" strokeWidth={1.8} />
@@ -190,8 +178,7 @@ const DropAnonymous = () => {
      ========================================= */
   if (sent) {
     return (
-      <div className="min-h-screen bg-zinc-950 flex items-center justify-center p-4 relative overflow-hidden">
-        {/* Background flourish */}
+      <div className="h-[100dvh] bg-zinc-950 flex items-center justify-center p-4 relative overflow-hidden">
         <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-yellow-500/5 blur-[120px] rounded-full pointer-events-none" />
         
         <div className="relative w-full max-w-md rounded-3xl border border-zinc-800/80 bg-zinc-900/60 p-10 text-center backdrop-blur-2xl animate-in fade-in zoom-in-95 duration-500 shadow-2xl">
@@ -222,19 +209,19 @@ const DropAnonymous = () => {
   const imagesLeft = MAX_IMAGES - images.length;
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col relative overflow-hidden">
+    // 👇 h-[100dvh] and overflow-hidden lock the screen height completely
+    <div className="h-[100dvh] bg-zinc-950 text-zinc-100 flex flex-col relative overflow-hidden">
+      
       {/* Ambient Background Glows */}
-      <div className="absolute top-0 left-0 w-full h-full overflow-hidden pointer-events-none">
+      <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="absolute -top-[20%] -left-[10%] w-[50%] h-[50%] bg-yellow-500/5 blur-[120px] rounded-full" />
         <div className="absolute bottom-[0%] right-[0%] w-[40%] h-[40%] bg-blue-500/5 blur-[120px] rounded-full" />
       </div>
 
-      <div className="relative flex-1 flex items-center justify-center p-4 md:p-8">
-        <div className="w-full max-w-5xl grid md:grid-cols-2 gap-10 md:gap-20 items-center">
+      <div className="relative flex-1 flex flex-col items-center justify-center p-4 md:p-8 min-h-0">
+        <div className="w-full max-w-5xl h-full md:h-auto grid md:grid-cols-2 gap-6 md:gap-20 items-center">
           
-          {/* =========================================
-              LEFT: BRANDING & WRITE-UP (Desktop only)
-              ========================================= */}
+          {/* LEFT: BRANDING & WRITE-UP (Desktop only) */}
           <div className="hidden md:flex flex-col items-start space-y-6 animate-in fade-in slide-in-from-left-8 duration-700">
             <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-zinc-900 border border-zinc-800 shadow-xl shadow-black/50">
               <Ghost className="h-7 w-7 text-yellow-500" strokeWidth={2} />
@@ -261,29 +248,28 @@ const DropAnonymous = () => {
             </div>
           </div>
 
-          {/* =========================================
-              RIGHT: FORM CARD
-              ========================================= */}
-          <div className="w-full relative animate-in fade-in slide-in-from-bottom-8 md:slide-in-from-right-8 duration-700 delay-150 fill-mode-both">
+          {/* RIGHT: FORM CARD */}
+          {/* 👇 flex-1 on mobile makes this form stretch to fill available screen space */}
+          <div className="w-full relative flex flex-col h-full md:h-auto animate-in fade-in slide-in-from-bottom-8 md:slide-in-from-right-8 duration-700 delay-150 fill-mode-both min-h-0">
             
-            {/* Mobile-only header */}
-            <div className="md:hidden text-center mb-6 space-y-2">
-              <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-2xl bg-zinc-900 border border-zinc-800 mb-4 shadow-lg">
-                <Ghost className="h-6 w-6 text-yellow-500" strokeWidth={2} />
+            {/* Mobile-only header (Made smaller to save vertical space) */}
+            <div className="md:hidden text-center mb-4 space-y-1 shrink-0">
+              <div className="mx-auto flex h-10 w-10 items-center justify-center rounded-xl bg-zinc-900 border border-zinc-800 mb-2 shadow-lg">
+                <Ghost className="h-5 w-5 text-yellow-500" strokeWidth={2} />
               </div>
-              <h1 className="text-2xl font-serif text-white tracking-tight">Drop a message.</h1>
-              <p className="text-[12px] text-zinc-500">Completely anonymous.</p>
+              <h1 className="text-xl font-serif text-white tracking-tight">Drop a message.</h1>
+              <p className="text-[11px] text-zinc-500">Completely anonymous.</p>
             </div>
 
+            {/* 👇 flex-1 and min-h-0 allow the textarea to consume the leftover space */}
             <form
               onSubmit={handleSubmit}
-              className="rounded-[2rem] border border-zinc-800/80 bg-zinc-900/40 p-5 md:p-6 backdrop-blur-2xl shadow-2xl shadow-black/50 overflow-hidden relative"
+              className="flex-1 flex flex-col min-h-0 rounded-[2rem] border border-zinc-800/80 bg-zinc-900/40 p-4 md:p-6 backdrop-blur-2xl shadow-2xl shadow-black/50 overflow-hidden relative"
             >
-              {/* Subtle top highlight */}
               <div className="absolute top-0 inset-x-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
 
-              {/* Textarea */}
-              <div className="relative">
+              {/* Textarea Container */}
+              <div className="relative flex-1 flex flex-col min-h-0">
                 <label htmlFor="drop-content" className="sr-only">Your message</label>
                 <textarea
                   id="drop-content"
@@ -291,13 +277,12 @@ const DropAnonymous = () => {
                   value={text}
                   onChange={(e) => setText(e.target.value)}
                   maxLength={MAX_CONTENT}
-                  rows={5}
                   placeholder="Write your anonymous message here..."
-                  className="w-full resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-white outline-none placeholder:text-zinc-600 custom-scrollbar"
+                  className="w-full flex-1 min-h-[80px] resize-none bg-transparent px-1 py-2 text-[15px] leading-relaxed text-white outline-none placeholder:text-zinc-600 custom-scrollbar"
                 />
                 
                 {/* Character Count */}
-                <div className="flex justify-end mt-2">
+                <div className="flex justify-end mt-1 shrink-0">
                   <span
                     className={`text-[10px] font-mono tabular-nums tracking-wider px-2 py-1 rounded-md transition-colors ${
                       charsLeft < 100 ? 'bg-yellow-500/10 text-yellow-500' : 'bg-zinc-900/50 text-zinc-600'
@@ -309,25 +294,25 @@ const DropAnonymous = () => {
               </div>
 
               {/* Divider */}
-              <div className="h-px w-full bg-zinc-800/60 my-2" />
+              <div className="h-px w-full bg-zinc-800/60 my-1 shrink-0" />
 
               {/* Image Attachments */}
               {info.acceptsImages && (
-                <div className="py-3">
-                  <div className="flex items-center justify-between mb-3 px-1">
+                <div className="py-2 shrink-0">
+                  <div className="flex items-center justify-between mb-2 px-1">
                     <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-zinc-500">
                       Attachments
                     </span>
                     <span className="text-[10px] text-zinc-600">
-                      Max {MAX_IMAGES} images
+                      Max {MAX_IMAGES}
                     </span>
                   </div>
 
-                  <div className="flex flex-wrap gap-2.5">
+                  <div className="flex flex-wrap gap-2">
                     {images.map((img, i) => (
                       <div
                         key={i}
-                        className="group relative h-[72px] w-[72px] overflow-hidden rounded-xl border border-zinc-700/50 bg-zinc-950 animate-in fade-in zoom-in-75"
+                        className="group relative h-[60px] w-[60px] overflow-hidden rounded-xl border border-zinc-700/50 bg-zinc-950 animate-in fade-in zoom-in-75"
                       >
                         <img
                           src={img.preview}
@@ -339,7 +324,7 @@ const DropAnonymous = () => {
                           type="button"
                           onClick={() => removeImage(i)}
                           aria-label="Remove image"
-                          className="absolute right-1 top-1 flex h-6 w-6 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-transform hover:bg-red-500 hover:scale-110"
+                          className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/60 text-white backdrop-blur-sm transition-transform hover:bg-red-500 hover:scale-110"
                         >
                           <X className="h-3 w-3" strokeWidth={2.6} />
                         </button>
@@ -350,9 +335,9 @@ const DropAnonymous = () => {
                       <button
                         type="button"
                         onClick={() => fileInputRef.current?.click()}
-                        className="flex h-[72px] w-[72px] flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed border-zinc-700/80 bg-zinc-900/30 text-zinc-500 transition-all hover:border-yellow-500/50 hover:bg-yellow-500/5 hover:text-yellow-500"
+                        className="flex h-[60px] w-[60px] flex-col items-center justify-center gap-1 rounded-xl border border-dashed border-zinc-700/80 bg-zinc-900/30 text-zinc-500 transition-all hover:border-yellow-500/50 hover:bg-yellow-500/5 hover:text-yellow-500"
                       >
-                        <ImagePlus className="h-5 w-5" strokeWidth={1.8} />
+                        <ImagePlus className="h-4 w-4" strokeWidth={1.8} />
                         <span className="text-[9px] font-bold uppercase tracking-wider">
                           Add
                         </span>
@@ -371,7 +356,7 @@ const DropAnonymous = () => {
               )}
 
               {/* Submit Button */}
-              <div className="mt-4 pt-2">
+              <div className="mt-2 shrink-0">
                 <button
                   type="submit"
                   disabled={isSubmitting || (!text.trim() && images.length === 0)}
@@ -388,21 +373,19 @@ const DropAnonymous = () => {
                       Send Anonymously
                     </>
                   )}
-                  {/* Shimmer effect */}
                   <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/20 to-transparent group-hover:animate-shimmer" />
                 </button>
               </div>
             </form>
             
             {/* Mobile Disclaimer */}
-            <p className="md:hidden mt-6 text-center text-[10.5px] leading-relaxed text-zinc-500/80 px-4">
+            <p className="md:hidden mt-3 shrink-0 text-center text-[10px] leading-relaxed text-zinc-500/80 px-4">
               Your identity is hidden. They will not know who sent this.
             </p>
           </div>
         </div>
       </div>
 
-      {/* Tailwind custom keyframes for the shimmer effect */}
       <style dangerouslySetInnerHTML={{__html: `
         @keyframes shimmer {
           100% { transform: translateX(100%); }
