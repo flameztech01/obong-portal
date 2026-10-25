@@ -21,6 +21,8 @@ import ManageCourses from './pages/ManageCourses.jsx';
 import Quizzes from './pages/Quizzes.jsx';
 import Study from "./pages/Study.jsx";
 import ManageMaterials from './pages/ManageMaterials.jsx';
+import Anonymous from './pages/Anonymous.jsx';
+import DropAnonymous from './pages/DropAnonymous.jsx'
 
 // Admin Layout & Pages
 import AdminLogin from './pages/admin/Login.jsx';
@@ -51,6 +53,7 @@ const router = createBrowserRouter([
       { path: "signup", element: <Signup /> },
       { path: "login", element: <Login /> },
       { path: "superuser/login", element: <AdminLogin /> },
+      {path: "drop/:token", element: <DropAnonymous />},
 
       // =========================================
       // STUDENT PORTAL
@@ -66,6 +69,7 @@ const router = createBrowserRouter([
           { path: "quizzes", element: <Quizzes /> },
           {path: "study", element: <Study />},
           {path: "manage-materials", element: <ManageMaterials />},
+          {path: "anonymous", element: <Anonymous />},
         ]
       },
 

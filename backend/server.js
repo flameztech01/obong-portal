@@ -12,6 +12,7 @@ import academicRoutes from "./routes/academicRoutes.js";
 import resultRoutes from "./routes/resultRoutes.js";
 import studyRoutes from "./routes/studyRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
+import postRoutes from "./routes/postRoutes.js"; // 👈 NEW
 
 import { notFound, errorHandler } from './middleware/errorMiddleware.js';
 
@@ -55,6 +56,7 @@ app.use("/api/academic", academicRoutes);
 app.use("/api/results", resultRoutes);
 app.use("/api/study", studyRoutes);
 app.use("/api/ai", aiRoutes);
+app.use("/api/posts", postRoutes); // 👈 NEW
 
 // Error Middleware
 app.use(notFound);
