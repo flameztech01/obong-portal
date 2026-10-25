@@ -5,6 +5,7 @@ import bodyParser from 'body-parser';
 import cookieParser from 'cookie-parser';
 import cors from 'cors';
 import mongoose from 'mongoose';
+import https from 'https'; // 👈 Added for fallback fetching
 
 import authRoutes from "./routes/authRoutes.js";
 import adminRoutes from "./routes/adminRoutes.js";
@@ -14,7 +15,7 @@ import studyRoutes from "./routes/studyRoutes.js";
 import aiRoutes from "./routes/aiRoutes.js";
 import postRoutes from "./routes/postRoutes.js"; 
 
-import PostLink from "./models/postLinkModel.js"; // 👈 Needed for OG tags
+import PostLink from "./models/postLinkModel.js";
 import { notFound, errorHandler } from './middleware/errorMiddleware.js';
 
 const app = express();
@@ -22,12 +23,16 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/myapp';
 
+// Ensure we have a clean frontend URL without trailing slashes
+const FRONTEND_URL = (process.env.FRONTEND_URL || "https://obongportal.curriumx.online").replace(/\/$/, "");
+
 // Middleware
 const allowedOrigins = [
   'http://localhost:2000',
   'http://localhost:5173',
   'http://localhost:3000',
   'https://obongportal.curriumx.online',
+  'https://obong-portal-server.onrender.com'
 ];
 
 app.use(cors({
@@ -51,20 +56,60 @@ app.get("/", (req, res) => {
 });
 
 // ============================================================
-// OG / LINK PREVIEW FOR /drop/:token
+// OG / LINK PREVIEW & SPA PROXY FOR /drop/:token
 // ============================================================
 const CRAWLER_RE = /(whatsapp|facebookexternalhit|twitterbot|telegrambot|linkedinbot|slackbot|discordbot|embedly|quora link preview|showyoubot|outbrain|pinterest|vkShare|W3C_Validator|redditbot|applebot|googlebot|bingbot|yandex|duckduckbot|skypeuripreview)/i;
 
 const escapeHtml = (s = "") =>
   String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 
-app.get("/drop/:token", async (req, res, next) => {
+// Bulletproof fetch helper
+async function fetchHtml(url) {
+  if (typeof fetch === 'function') {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error(`Status ${res.status}`);
+    return await res.text();
+  }
+  
+  // Fallback for older Node versions on Render
+  return new Promise((resolve, reject) => {
+    https.get(url, (res) => {
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        return reject(new Error(`Status ${res.statusCode}`));
+      }
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => resolve(data));
+    }).on('error', reject);
+  });
+}
+
+app.get("/drop/:token", async (req, res) => {
   const ua = req.headers["user-agent"] || "";
   const isCrawler = CRAWLER_RE.test(ua);
 
-  // If it's a real human, let it pass through (React app will handle it)
-  if (!isCrawler) return next();
+  // ── 1. REAL HUMANS: Serve the React App ──
+  if (!isCrawler) {
+    try {
+      const html = await fetchHtml(`${FRONTEND_URL}/`);
+      return res.status(200).set("Content-Type", "text/html; charset=utf-8").send(html);
+    } catch (err) {
+      console.error("❌ Proxy error fetching frontend:", err.message);
+      // Return HTML error instead of JSON so the browser doesn't show "Not Found"
+      return res.status(502).send(`
+        <html>
+          <body style="background:#111;color:#fff;font-family:sans-serif;padding:2rem;text-align:center;">
+            <h1>Proxy Error</h1>
+            <p>Could not load the frontend app. Ensure FRONTEND_URL is correct and the frontend is online.</p>
+            <p style="color:#f4a825;">Target: ${FRONTEND_URL}</p>
+            <p style="color:#888;font-size:0.8rem;">Error: ${escapeHtml(err.message)}</p>
+          </body>
+        </html>
+      `);
+    }
+  }
 
+  // ── 2. CRAWLERS: Serve the OG Meta Tags ──
   try {
     const { token } = req.params;
     const link = await PostLink.findOne({ token, isActive: true }).populate("owner", "name");
@@ -73,15 +118,12 @@ app.get("/drop/:token", async (req, res, next) => {
       return res.status(404).send("Link not found or expired");
     }
 
-    // 👇 CHANGED to FRONTEND_URL
-    const frontend = process.env.FRONTEND_URL || "https://obongportal.curriumx.online";
-    const url = `${frontend}/drop/${token}`;
-    
-    // Custom Write-up & Image
+    const url = `${FRONTEND_URL}/drop/${token}`;
     const ownerName = link.owner?.name?.split(" ")[0] || "me";
+    
     const title = `Send ${ownerName} an anonymous message`;
     const desc = "Got a secret or a thought? Drop it here completely anonymously. Your identity is protected.";
-    const img = `${frontend}/og-anonymous.png`; // Make sure this image exists in your frontend public folder
+    const img = `${FRONTEND_URL}/og-anonymous.png`;
 
     const html = `<!DOCTYPE html>
 <html lang="en">
@@ -120,7 +162,7 @@ app.get("/drop/:token", async (req, res, next) => {
       
   } catch (err) {
     console.error("OG render failed:", err.message);
-    return next();
+    return res.status(500).send("Server Error generating preview");
   }
 });
 
@@ -133,7 +175,7 @@ app.use("/api/study", studyRoutes);
 app.use("/api/ai", aiRoutes);
 app.use("/api/posts", postRoutes); 
 
-// Error Middleware
+// Error Middleware (Only hits if a route isn't matched at all)
 app.use(notFound);
 app.use(errorHandler);
 
