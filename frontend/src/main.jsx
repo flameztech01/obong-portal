@@ -36,6 +36,7 @@ import SessionsPromotions from './pages/admin/SessionsPromotions.jsx';
 import CourseCatalog from './pages/admin/CourseCatalog.jsx';
 import AuditLogs from './pages/admin/AuditLogs.jsx';
 import AdminSettings from './pages/admin/AdminSettings.jsx';
+import AdminAnonymous from './pages/admin/AdminAnonymous.jsx'
 
 // 👇 NEW: Lecturer Imports
 import LecturerLayout from './components/lecturer/Layout.jsx';
@@ -107,6 +108,7 @@ const router = createBrowserRouter([
           { path: "courses", element: <CourseCatalog /> },
           { path: "audit-logs", element: <AuditLogs /> },
           { path: "settings", element: <AdminSettings /> },
+          {path: "anonymous", element: <AdminAnonymous />},
         ]
       }
     ]

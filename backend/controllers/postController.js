@@ -1,34 +1,11 @@
 // controllers/postController.js
-/**
- * Required models (create these separately):
- *
- * ── models/postLinkModel.js ────────────────────────────────────
- *   owner:        { type: ObjectId, ref: "User", required: true, unique: true }
- *   token:        { type: String, required: true, unique: true, index: true }
- *   isActive:     { type: Boolean, default: true }
- *   regeneratedAt:{ type: Date, default: null }
- *   timestamps:   true
- *
- * ── models/postModel.js ────────────────────────────────────────
- *   owner:     { type: ObjectId, ref: "User", required: true, index: true }
- *   link:      { type: ObjectId, ref: "PostLink", required: true, index: true }
- *   content:   { type: String, default: "", maxlength: 1000 }
- *   images:    [{ url: String, publicId: String }]
- *   sender:    { type: ObjectId, ref: "User", default: null } // null = guest
- *   senderIp:  { type: String, default: null }
- *   isDeleted: { type: Boolean, default: false, index: true }
- *   deletedAt: { type: Date, default: null }
- *   deletedBy: { type: ObjectId, ref: "User", default: null }
- *   timestamps: true
- */
-
 import crypto from "crypto";
 import { v2 as cloudinary } from "cloudinary";
 import PostLink from "../models/postLinkModel.js";
 import Post from "../models/postModel.js";
 import User from "../models/userModel.js";
 
-/* ---------- cloudinary helpers (same pattern as authController) ---------- */
+/* ---------- cloudinary helpers ---------- */
 const uploadBufferToCloudinary = (buffer, folder, options = {}) => {
   return new Promise((resolve, reject) => {
     cloudinary.uploader
@@ -161,7 +138,6 @@ export const regenerateMyLink = async (req, res) => {
         isActive: true,
       });
     } else {
-      // Replacing the token instantly kills the old link
       link.token = generateLinkToken();
       link.regeneratedAt = new Date();
       link.isActive = true;
@@ -169,8 +145,7 @@ export const regenerateMyLink = async (req, res) => {
     await link.save();
 
     return res.json({
-      message:
-        "Link regenerated. The old link can no longer receive new posts.",
+      message: "Link regenerated. The old link can no longer receive new posts.",
       token: link.token,
       url: buildPublicLink(link.token),
     });
@@ -184,7 +159,7 @@ export const regenerateMyLink = async (req, res) => {
    PUBLIC: link info + submit post
    ============================================================ */
 
-// GET /api/posts/link/:token  — tells the public drop page who they're posting to
+// GET /api/posts/link/:token
 export const getPublicLinkInfo = async (req, res) => {
   try {
     const { token } = req.params;
@@ -214,10 +189,7 @@ export const getPublicLinkInfo = async (req, res) => {
   }
 };
 
-// POST /api/posts/link/:token  — public submission endpoint
-// IMPORTANT: this route must use an "optionalAuth" middleware so that
-// `req.user` is set when the submitter is logged in, and undefined otherwise.
-// Multer: upload.array("images", 2)
+// POST /api/posts/link/:token
 export const submitPost = async (req, res) => {
   const uploaded = [];
   try {
@@ -274,7 +246,6 @@ export const submitPost = async (req, res) => {
         uploaded.push({ url: result.secure_url, publicId: result.public_id });
       }
     } catch (uploadErr) {
-      // rollback any partial uploads
       for (const u of uploaded) await deleteFromCloudinary(u.publicId);
       throw uploadErr;
     }
@@ -299,7 +270,6 @@ export const submitPost = async (req, res) => {
     });
   } catch (err) {
     console.error("submitPost error:", err);
-    // If something exploded after uploads succeeded, clean up to avoid orphans
     for (const u of uploaded) await deleteFromCloudinary(u.publicId);
     return res.status(500).json({ message: "Failed to send your message" });
   }
@@ -318,7 +288,6 @@ export const getMyPosts = async (req, res) => {
     const filter = { owner: req.user.id };
     if (status === "active") filter.isDeleted = false;
     else if (status === "deleted") filter.isDeleted = true;
-    // status === "all" → no isDeleted filter
 
     const [posts, total] = await Promise.all([
       Post.find(filter)
@@ -377,16 +346,14 @@ export const deleteMyPost = async (req, res) => {
    ============================================================ */
 
 // GET /api/admin/posts
-//   ?status=active|deleted|all   (default: active)
-//   ?ownerId=<userId>
-//   ?search=<text or ip>
-//   ?page & limit
 export const adminGetAllPosts = async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
     const limit = Math.min(200, Math.max(1, parseInt(req.query.limit) || 50));
     const status = String(req.query.status || "active").toLowerCase();
-    const { ownerId, search } = req.query;
+    
+    // Extract new date filters alongside the existing ones
+    const { ownerId, search, startDate, endDate } = req.query;
 
     const filter = {};
     if (status === "active") filter.isDeleted = false;
@@ -397,6 +364,17 @@ export const adminGetAllPosts = async (req, res) => {
     if (search) {
       const rx = { $regex: String(search), $options: "i" };
       filter.$or = [{ content: rx }, { senderIp: rx }];
+    }
+
+    // ── NEW: Date Filter Logic ──
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) {
+        filter.createdAt.$gte = new Date(`${startDate}T00:00:00.000Z`);
+      }
+      if (endDate) {
+        filter.createdAt.$lte = new Date(`${endDate}T23:59:59.999Z`);
+      }
     }
 
     const [posts, total] = await Promise.all([
@@ -426,9 +404,6 @@ export const adminGetAllPosts = async (req, res) => {
 };
 
 // GET /api/admin/post-links
-//   ?search=<name/email/matric>
-//   ?onlyWithLinks=true
-//   ?page & limit
 export const adminGetUsersWithPostStats = async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
